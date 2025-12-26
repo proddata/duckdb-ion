@@ -130,6 +130,42 @@ SELECT name FROM read_ion('test/ion/array_binary.ion', format := 'array');
 alpha
 beta
 
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_text.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_binary.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_binary.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_text.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/array_text.ion', format := 'array')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/array_binary.ion', format := 'array')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/array_binary.ion', format := 'array')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/array_text.ion', format := 'array')
+);
+----
+0
+
 statement ok
 COPY (SELECT 1 AS a, 'x' AS b) TO '__TEST_DIR__/ion_write.ion' (FORMAT ION);
 
