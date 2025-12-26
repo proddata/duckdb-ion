@@ -12,6 +12,7 @@
 #include "duckdb/function/cast/default_casts.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/main/query_context.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -45,8 +46,7 @@ struct IonReadBindData : public TableFunctionData {
 struct IonReadGlobalState : public GlobalTableFunctionState {
 #ifdef DUCKDB_IONC
 	ION_READER *reader = nullptr;
-	ION_STREAM *stream = nullptr;
-	FILE *file = nullptr;
+	vector<BYTE> buffer;
 #endif
 	bool finished = false;
 	bool array_initialized = false;
@@ -56,19 +56,35 @@ struct IonReadGlobalState : public GlobalTableFunctionState {
 		if (reader) {
 			ion_reader_close(reader);
 		}
-		if (stream) {
-			ion_stream_close(stream);
-		}
-		if (file) {
-			fclose(file);
-		}
 #endif
 	}
 };
 
+static void ReadFileToBuffer(ClientContext &context, const string &path, vector<BYTE> &buffer) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	auto size = handle->GetFileSize();
+	if (size < 0) {
+		throw IOException("read_ion failed to read file size");
+	}
+	buffer.resize(static_cast<idx_t>(size));
+	idx_t offset = 0;
+	while (offset < buffer.size()) {
+		auto read = handle->Read(QueryContext(context), buffer.data() + offset, buffer.size() - offset);
+		if (read <= 0) {
+			break;
+		}
+		offset += static_cast<idx_t>(read);
+	}
+	handle->Close();
+	if (offset != buffer.size()) {
+		buffer.resize(offset);
+	}
+}
+
 static void InferIonSchema(const string &path, vector<string> &names, vector<LogicalType> &types,
                            IonReadBindData::Format format, IonReadBindData::RecordsMode records_mode,
-                           bool &records_out);
+                           bool &records_out, ClientContext &context);
 static void ParseColumnsParameter(ClientContext &context, const Value &value, vector<string> &names,
                                   vector<LogicalType> &types);
 static void ParseFormatParameter(const Value &value, IonReadBindData::Format &format);
@@ -101,7 +117,7 @@ static unique_ptr<FunctionData> IonReadBind(ClientContext &context, TableFunctio
 	}
 	if (bind_data->names.empty()) {
 		InferIonSchema(bind_data->path, bind_data->names, bind_data->return_types, bind_data->format,
-		               bind_data->records_mode, bind_data->records);
+		               bind_data->records_mode, bind_data->records, context);
 	} else {
 		bind_data->records = true;
 	}
@@ -119,15 +135,12 @@ static unique_ptr<GlobalTableFunctionState> IonReadInit(ClientContext &context, 
 #ifndef DUCKDB_IONC
 	throw InvalidInputException("read_ion requires ion-c; rebuild with ion-c available");
 #else
-	result->file = fopen(bind_data.path.c_str(), "rb");
-	if (!result->file) {
-		throw IOException("read_ion failed to open file");
+	ReadFileToBuffer(context, bind_data.path, result->buffer);
+	if (result->buffer.empty()) {
+		throw IOException("read_ion failed to read file");
 	}
-	auto status = ion_stream_open_file_in(result->file, &result->stream);
-	if (status != IERR_OK) {
-		throw IOException("read_ion failed to open Ion stream");
-	}
-	status = ion_reader_open(&result->reader, result->stream, nullptr);
+	auto status = ion_reader_open_buffer(&result->reader, result->buffer.data(),
+	                                     static_cast<SIZE>(result->buffer.size()), nullptr);
 	if (status != IERR_OK) {
 		throw IOException("read_ion failed to open Ion reader");
 	}
@@ -416,22 +429,15 @@ static void ParseRecordsParameter(const Value &value, IonReadBindData::RecordsMo
 
 static void InferIonSchema(const string &path, vector<string> &names, vector<LogicalType> &types,
                            IonReadBindData::Format format, IonReadBindData::RecordsMode records_mode,
-                           bool &records_out) {
-	FILE *file = fopen(path.c_str(), "rb");
-	if (!file) {
-		throw IOException("read_ion failed to open file for schema inference");
-	}
-	ION_STREAM *stream = nullptr;
+                           bool &records_out, ClientContext &context) {
 	ION_READER *reader = nullptr;
-	auto status = ion_stream_open_file_in(file, &stream);
-	if (status != IERR_OK) {
-		fclose(file);
-		throw IOException("read_ion failed to open Ion stream for schema inference");
+	vector<BYTE> buffer;
+	ReadFileToBuffer(context, path, buffer);
+	if (buffer.empty()) {
+		throw IOException("read_ion failed to read file for schema inference");
 	}
-	status = ion_reader_open(&reader, stream, nullptr);
+	auto status = ion_reader_open_buffer(&reader, buffer.data(), static_cast<SIZE>(buffer.size()), nullptr);
 	if (status != IERR_OK) {
-		ion_stream_close(stream);
-		fclose(file);
 		throw IOException("read_ion failed to open Ion reader for schema inference");
 	}
 
@@ -450,8 +456,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 		}
 		if (status != IERR_OK) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw IOException("read_ion failed while inferring schema");
 		}
 		return true;
@@ -460,14 +464,10 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 	auto read_record = [&](ION_TYPE type) {
 		if (type != tid_STRUCT) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw InvalidInputException("read_ion expects records to be structs");
 		}
 		if (ion_reader_step_in(reader) != IERR_OK) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw IOException("read_ion failed to step into struct during schema inference");
 		}
 		while (true) {
@@ -478,8 +478,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 			}
 			if (field_status != IERR_OK) {
 				ion_reader_close(reader);
-				ion_stream_close(stream);
-				fclose(file);
 				throw IOException("read_ion failed while reading struct field");
 			}
 			ION_STRING field_name;
@@ -487,8 +485,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 			field_name.length = 0;
 			if (ion_reader_get_field_name(reader, &field_name) != IERR_OK) {
 				ion_reader_close(reader);
-				ion_stream_close(stream);
-				fclose(file);
 				throw IOException("read_ion failed to read field name");
 			}
 			auto name = string(reinterpret_cast<const char *>(field_name.value), field_name.length);
@@ -508,8 +504,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 		}
 		if (ion_reader_step_out(reader) != IERR_OK) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw IOException("read_ion failed to step out of struct during schema inference");
 		}
 	};
@@ -532,20 +526,14 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 		ION_TYPE outer_type = tid_NULL;
 		if (!next_value(outer_type)) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw InvalidInputException("read_ion expects a top-level list when format='array'");
 		}
 		if (outer_type != tid_LIST) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw InvalidInputException("read_ion expects a top-level list when format='array'");
 		}
 		if (ion_reader_step_in(reader) != IERR_OK) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw IOException("read_ion failed to step into list during schema inference");
 		}
 		while (rows < max_rows) {
@@ -556,8 +544,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 			BOOL is_null = FALSE;
 			if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
 				ion_reader_close(reader);
-				ion_stream_close(stream);
-				fclose(file);
 				throw IOException("read_ion failed while checking null during schema inference");
 			}
 			if (is_null) {
@@ -577,8 +563,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 		}
 		if (ion_reader_step_out(reader) != IERR_OK) {
 			ion_reader_close(reader);
-			ion_stream_close(stream);
-			fclose(file);
 			throw IOException("read_ion failed to step out of list during schema inference");
 		}
 	} else {
@@ -590,8 +574,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 			BOOL is_null = FALSE;
 			if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
 				ion_reader_close(reader);
-				ion_stream_close(stream);
-				fclose(file);
 				throw IOException("read_ion failed while checking null during schema inference");
 			}
 			if (is_null) {
@@ -612,8 +594,6 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 	}
 
 	ion_reader_close(reader);
-	ion_stream_close(stream);
-	fclose(file);
 
 	if (names.empty()) {
 		throw InvalidInputException("read_ion could not infer schema from input");

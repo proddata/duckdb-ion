@@ -39,11 +39,57 @@ static void AppendEscapedString(const string &input, string &out) {
 	out.push_back('"');
 }
 
+static bool IsBareSymbol(const string &input) {
+	if (input.empty()) {
+		return false;
+	}
+	auto first = input[0];
+	if (!(isalpha(static_cast<unsigned char>(first)) || first == '_')) {
+		return false;
+	}
+	for (auto c : input) {
+		if (!(isalnum(static_cast<unsigned char>(c)) || c == '_')) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void AppendSymbol(const string &input, string &out) {
+	if (IsBareSymbol(input)) {
+		out += input;
+		return;
+	}
+	out.push_back('\'');
+	for (auto c : input) {
+		if (c == '\\') {
+			out += "\\\\";
+		} else if (c == '\'') {
+			out += "\\'";
+		} else if (c == '\n') {
+			out += "\\n";
+		} else if (c == '\r') {
+			out += "\\r";
+		} else if (c == '\t') {
+			out += "\\t";
+		} else {
+			out.push_back(c);
+		}
+	}
+	out.push_back('\'');
+}
+
 static void AppendTimestampString(const Value &value, string &out) {
 	auto text = value.ToString();
 	auto pos = text.find(' ');
 	if (pos != string::npos) {
 		text[pos] = 'T';
+	}
+	if (text.find('T') != string::npos) {
+		auto tz_pos = text.find_last_of("+-Z");
+		if (tz_pos == string::npos || tz_pos < text.find('T')) {
+			text += "Z";
+		}
 	}
 	out += text;
 }
@@ -114,7 +160,7 @@ static void SerializeIonValue(const Value &value, string &out) {
 				out += ", ";
 			}
 			auto &name = StructType::GetChildName(type, i);
-			AppendEscapedString(name, out);
+			AppendSymbol(name, out);
 			out += ": ";
 			SerializeIonValue(children[i], out);
 		}
