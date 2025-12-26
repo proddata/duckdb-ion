@@ -1,6 +1,8 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "ion_extension.hpp"
+#include "ion_copy.hpp"
+#include "ion_serialize.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -730,11 +732,13 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	RegisterIonScalarFunctions(loader);
 	TableFunction read_ion("read_ion", {LogicalType::VARCHAR}, IonReadFunction, IonReadBind, IonReadInit);
 	read_ion.named_parameters["columns"] = LogicalType::ANY;
 	read_ion.named_parameters["format"] = LogicalType::VARCHAR;
 	read_ion.named_parameters["records"] = LogicalType::ANY;
 	loader.RegisterFunction(read_ion);
+	RegisterIonCopyFunction(loader);
 }
 
 void IonExtension::Load(ExtensionLoader &loader) {

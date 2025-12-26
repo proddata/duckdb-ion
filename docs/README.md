@@ -80,6 +80,25 @@ SQLLogicTests live in `test/sql`:
 make test
 ```
 
+## Writing Ion
+Use `COPY ... TO` with `FORMAT ION` to export newline‑delimited Ion structs:
+```sql
+COPY (SELECT 1 AS a, 'x' AS b) TO 'out.ion' (FORMAT ION);
+```
+To wrap output in a single Ion list:
+```sql
+COPY (SELECT 1 AS a UNION ALL SELECT 2 AS a) TO 'out.ion' (FORMAT ION, ARRAY TRUE);
+```
+
+### to_ion
+Use `to_ion` to serialize a value (including structs/lists) into Ion text:
+```sql
+SELECT to_ion(struct_pack(a := 1, b := ['x', 'y']));
+```
+Notes:
+- `BLOB` values are emitted as Ion blobs using base64 inside `{{...}}`.
+- `DATE`/`TIMESTAMP`/`TIMESTAMPTZ` values are serialized using DuckDB’s default string representation (with a `T` separator).
+
 ## Installing (Unsigned)
 If you are loading a local or custom build, you may need `allow_unsigned_extensions`:
 ```sql

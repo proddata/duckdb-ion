@@ -129,3 +129,33 @@ SELECT name FROM read_ion('test/ion/array_binary.ion', format := 'array');
 ----
 alpha
 beta
+
+statement ok
+COPY (SELECT 1 AS a, 'x' AS b) TO '__TEST_DIR__/ion_write.ion' (FORMAT ION);
+
+query II
+SELECT a, b FROM read_ion('__TEST_DIR__/ion_write.ion');
+----
+1	x
+
+statement ok
+COPY (SELECT 1 AS a UNION ALL SELECT 2) TO '__TEST_DIR__/ion_write_array.ion' (FORMAT ION, ARRAY TRUE);
+
+query I
+SELECT a FROM read_ion('__TEST_DIR__/ion_write_array.ion', format := 'array');
+----
+1
+2
+
+statement ok
+COPY (SELECT {'name': 'alpha', 'nums': [1, 2]} AS s
+      UNION ALL
+      SELECT {'name': 'beta', 'nums': [3]} AS s)
+TO '__TEST_DIR__/ion_write_nested.ion' (FORMAT ION);
+
+query II
+SELECT s.name, list_extract(s.nums, 2)
+FROM read_ion('__TEST_DIR__/ion_write_nested.ion');
+----
+alpha	2
+beta	NULL
