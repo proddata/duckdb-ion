@@ -13,7 +13,7 @@
 #include "duckdb/function/cast/default_casts.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
-#include "duckdb/main/query_context.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include "duckdb/common/types/decimal.hpp"
@@ -21,6 +21,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/common/helper.hpp"
+#include <chrono>
+#include <iostream>
 #include <mutex>
 
 #ifdef DUCKDB_IONC
@@ -47,6 +49,7 @@ struct IonReadBindData : public TableFunctionData {
 	Format format = Format::AUTO;
 	RecordsMode records_mode = RecordsMode::AUTO;
 	bool records = true;
+	bool profile = false;
 };
 
 struct IonStreamState {
@@ -68,6 +71,14 @@ struct IonReadScanState {
 	bool finished = false;
 	bool array_initialized = false;
 	bool reader_initialized = false;
+	struct Timing {
+		uint64_t next_nanos = 0;
+		uint64_t value_nanos = 0;
+		uint64_t struct_nanos = 0;
+		uint64_t rows = 0;
+		uint64_t fields = 0;
+		bool reported = false;
+	} timing;
 
 	void ResetReader() {
 #ifdef DUCKDB_IONC
@@ -104,8 +115,11 @@ struct IonReadGlobalState : public GlobalTableFunctionState {
 	idx_t chunk_size = 4 * 1024 * 1024;
 	idx_t max_threads = 1;
 	bool parallel_enabled = false;
+	vector<column_t> column_ids;
+	idx_t inflight_ranges = 0;
+	IonReadScanState::Timing aggregate_timing;
 
-	idx_t MaxThreads() override {
+	idx_t MaxThreads() const override {
 		return max_threads;
 	}
 };
@@ -115,7 +129,7 @@ struct IonReadLocalState : public LocalTableFunctionState {
 	bool range_assigned = false;
 };
 
-static iERR IonStreamHandler(ION_STREAM *pstream) {
+static iERR IonStreamHandler(struct _ion_user_stream *pstream) {
 	if (!pstream || !pstream->handler_state) {
 		return IERR_EOF;
 	}
@@ -152,6 +166,7 @@ static void ParseColumnsParameter(ClientContext &context, const Value &value, ve
                                   vector<LogicalType> &types);
 static void ParseFormatParameter(const Value &value, IonReadBindData::Format &format);
 static void ParseRecordsParameter(const Value &value, IonReadBindData::RecordsMode &records_mode);
+static void ParseProfileParameter(const Value &value, bool &profile);
 
 static unique_ptr<FunctionData> IonReadBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<string> &names) {
@@ -171,6 +186,8 @@ static unique_ptr<FunctionData> IonReadBind(ClientContext &context, TableFunctio
 			ParseFormatParameter(kv.second, bind_data->format);
 		} else if (option == "records") {
 			ParseRecordsParameter(kv.second, bind_data->records_mode);
+		} else if (option == "profile") {
+			ParseProfileParameter(kv.second, bind_data->profile);
 		} else {
 			throw BinderException("read_ion does not support named parameter \"%s\"", kv.first);
 		}
@@ -204,6 +221,7 @@ static unique_ptr<GlobalTableFunctionState> IonReadInit(ClientContext &context, 
 	result->scan_state.reader_options = {};
 	result->scan_state.reader_options.skip_character_validation = TRUE;
 	result->file_size = result->scan_state.stream_state.handle->GetFileSize();
+	result->column_ids = input.column_ids;
 	result->parallel_enabled = bind_data.format == IonReadBindData::Format::NEWLINE_DELIMITED && bind_data.records &&
 	                           result->scan_state.stream_state.handle->CanSeek();
 	if (result->parallel_enabled) {
@@ -266,6 +284,29 @@ static bool InitializeIonRange(IonReadGlobalState &global_state, IonReadLocalSta
 	return true;
 }
 
+static void ReportProfile(IonReadGlobalState &global_state, IonReadScanState &scan_state) {
+	lock_guard<mutex> guard(global_state.lock);
+	global_state.aggregate_timing.next_nanos += scan_state.timing.next_nanos;
+	global_state.aggregate_timing.value_nanos += scan_state.timing.value_nanos;
+	global_state.aggregate_timing.struct_nanos += scan_state.timing.struct_nanos;
+	global_state.aggregate_timing.rows += scan_state.timing.rows;
+	global_state.aggregate_timing.fields += scan_state.timing.fields;
+	if (global_state.inflight_ranges > 0) {
+		global_state.inflight_ranges--;
+	}
+	const bool done = !global_state.parallel_enabled ||
+	                  (global_state.next_offset >= global_state.file_size && global_state.inflight_ranges == 0);
+	if (done && !global_state.aggregate_timing.reported) {
+		global_state.aggregate_timing.reported = true;
+		auto to_ms = [](uint64_t nanos) { return static_cast<double>(nanos) / 1000000.0; };
+		std::cout << "read_ion aggregate timing: rows=" << global_state.aggregate_timing.rows
+		          << " fields=" << global_state.aggregate_timing.fields
+		          << " next_ms=" << to_ms(global_state.aggregate_timing.next_nanos)
+		          << " value_ms=" << to_ms(global_state.aggregate_timing.value_nanos)
+		          << " struct_ms=" << to_ms(global_state.aggregate_timing.struct_nanos) << std::endl;
+	}
+}
+
 static unique_ptr<LocalTableFunctionState> IonReadInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
                                                             GlobalTableFunctionState *global_state_p) {
 	if (!global_state_p) {
@@ -286,6 +327,9 @@ static unique_ptr<LocalTableFunctionState> IonReadInitLocal(ExecutionContext &co
 	result->scan_state.reader_options = global_state.scan_state.reader_options;
 	if (!InitializeIonRange(global_state, *result)) {
 		result->scan_state.finished = true;
+	} else {
+		lock_guard<mutex> guard(global_state.lock);
+		global_state.inflight_ranges++;
 	}
 #endif
 	return std::move(result);
@@ -333,7 +377,7 @@ static Value IonReadValue(ION_READER *reader, ION_TYPE type) {
 		if (ion_reader_read_ion_decimal(reader, &decimal) != IERR_OK) {
 			throw IOException("read_ion failed to read decimal");
 		}
-		vector<char> buffer(ION_DECIMAL_STRLEN(&decimal) + 1);
+		std::vector<char> buffer(ION_DECIMAL_STRLEN(&decimal) + 1);
 		ion_decimal_to_string(&decimal, buffer.data());
 		ion_decimal_free(&decimal);
 		auto decimal_str = string(buffer.data());
@@ -382,7 +426,7 @@ static Value IonReadValue(ION_READER *reader, ION_TYPE type) {
 		if (ion_reader_get_lob_size(reader, &length) != IERR_OK) {
 			throw IOException("read_ion failed to get blob size");
 		}
-		vector<BYTE> buffer(length);
+		std::vector<BYTE> buffer(length);
 		SIZE read_bytes = 0;
 		if (ion_reader_read_lob_bytes(reader, buffer.data(), length, &read_bytes) != IERR_OK) {
 			throw IOException("read_ion failed to read blob");
@@ -526,6 +570,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		}
 		auto data = FlatVector::GetData<bool>(vector);
 		data[row] = value != FALSE;
+		FlatVector::Validity(vector).SetValid(row);
 		return true;
 	}
 	case LogicalTypeId::BIGINT: {
@@ -544,6 +589,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		}
 		auto data = FlatVector::GetData<int64_t>(vector);
 		data[row] = value;
+		FlatVector::Validity(vector).SetValid(row);
 		return true;
 	}
 	case LogicalTypeId::DOUBLE: {
@@ -563,6 +609,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		}
 		auto data = FlatVector::GetData<double>(vector);
 		data[row] = value;
+		FlatVector::Validity(vector).SetValid(row);
 		return true;
 	}
 	case LogicalTypeId::DECIMAL: {
@@ -574,7 +621,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		if (ion_reader_read_ion_decimal(reader, &decimal) != IERR_OK) {
 			throw IOException("read_ion failed to read decimal");
 		}
-		vector<char> buffer(ION_DECIMAL_STRLEN(&decimal) + 1);
+		std::vector<char> buffer(ION_DECIMAL_STRLEN(&decimal) + 1);
 		ion_decimal_to_string(&decimal, buffer.data());
 		ion_decimal_free(&decimal);
 		auto decimal_str = string(buffer.data());
@@ -587,6 +634,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		}
 		auto data = FlatVector::GetData<hugeint_t>(vector);
 		data[row] = decimal_value;
+		FlatVector::Validity(vector).SetValid(row);
 		return true;
 	}
 	case LogicalTypeId::TIMESTAMP:
@@ -618,6 +666,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 			auto data = FlatVector::GetData<timestamp_t>(vector);
 			data[row] = ts;
 		}
+		FlatVector::Validity(vector).SetValid(row);
 		return true;
 	}
 	case LogicalTypeId::VARCHAR: {
@@ -633,6 +682,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		}
 		auto data = FlatVector::GetData<string_t>(vector);
 		data[row] = StringVector::AddString(vector, reinterpret_cast<const char *>(value.value), value.length);
+		FlatVector::Validity(vector).SetValid(row);
 		return true;
 	}
 	case LogicalTypeId::BLOB: {
@@ -643,7 +693,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		if (ion_reader_get_lob_size(reader, &length) != IERR_OK) {
 			throw IOException("read_ion failed to get blob size");
 		}
-		vector<BYTE> buffer(length);
+		std::vector<BYTE> buffer(length);
 		SIZE read_bytes = 0;
 		if (ion_reader_read_lob_bytes(reader, buffer.data(), length, &read_bytes) != IERR_OK) {
 			throw IOException("read_ion failed to read blob");
@@ -651,6 +701,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 		auto data = FlatVector::GetData<string_t>(vector);
 		data[row] = StringVector::AddStringOrBlob(vector, reinterpret_cast<const char *>(buffer.data()),
 		                                          static_cast<idx_t>(read_bytes));
+		FlatVector::Validity(vector).SetValid(row);
 		return true;
 	}
 	default:
@@ -722,6 +773,13 @@ static void ParseRecordsParameter(const Value &value, IonReadBindData::RecordsMo
 	}
 }
 
+static void ParseProfileParameter(const Value &value, bool &profile) {
+	if (value.type().id() != LogicalTypeId::BOOLEAN) {
+		throw BinderException("read_ion \"profile\" parameter must be BOOLEAN.");
+	}
+	profile = BooleanValue::Get(value);
+}
+
 static void InferIonSchema(const string &path, vector<string> &names, vector<LogicalType> &types,
                            IonReadBindData::Format format, IonReadBindData::RecordsMode records_mode,
                            bool &records_out, ClientContext &context) {
@@ -777,15 +835,15 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 				ion_reader_close(reader);
 				throw IOException("read_ion failed while reading struct field");
 			}
-			ION_SYMBOL field_symbol = {};
+			ION_SYMBOL *field_symbol = nullptr;
 			if (ion_reader_get_field_name_symbol(reader, &field_symbol) != IERR_OK) {
 				ion_reader_close(reader);
 				throw IOException("read_ion failed to read field name");
 			}
 			idx_t field_idx = 0;
 			bool have_index = false;
-			if (field_symbol.sid > 0) {
-				auto sid_it = sid_map.find(field_symbol.sid);
+			if (field_symbol && field_symbol->sid > 0) {
+				auto sid_it = sid_map.find(field_symbol->sid);
 				if (sid_it != sid_map.end()) {
 					field_idx = sid_it->second;
 					have_index = true;
@@ -793,8 +851,8 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 			}
 			if (!have_index) {
 				string name;
-				if (field_symbol.value && field_symbol.length > 0) {
-					name = string(reinterpret_cast<const char *>(field_symbol.value), field_symbol.length);
+				if (field_symbol && field_symbol->value.value && field_symbol->value.length > 0) {
+					name = string(reinterpret_cast<const char *>(field_symbol->value.value), field_symbol->value.length);
 				} else {
 					ION_STRING field_name;
 					field_name.value = nullptr;
@@ -814,8 +872,8 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 				} else {
 					field_idx = it->second;
 				}
-				if (field_symbol.sid > 0) {
-					sid_map.emplace(field_symbol.sid, field_idx);
+				if (field_symbol && field_symbol->sid > 0) {
+					sid_map.emplace(field_symbol->sid, field_idx);
 				}
 			}
 			auto value = IonReadValue(reader, field_type);
@@ -938,6 +996,11 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		if (local_state && InitializeIonRange(global_state, *local_state)) {
 			scan_state = &local_state->scan_state;
 		} else {
+			auto &bind_data = data_p.bind_data->Cast<IonReadBindData>();
+			if (bind_data.profile && !scan_state->timing.reported) {
+				scan_state->timing.reported = true;
+				ReportProfile(global_state, *scan_state);
+			}
 			output.SetCardinality(0);
 			return;
 		}
@@ -946,6 +1009,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 	throw InvalidInputException("read_ion requires ion-c; rebuild with ion-c available");
 #else
 	auto &bind_data = data_p.bind_data->Cast<IonReadBindData>();
+	const auto profile = bind_data.profile;
 	if (!scan_state->reader_initialized) {
 		auto status =
 		    ion_reader_open_stream(&scan_state->reader, &scan_state->stream_state, IonStreamHandler,
@@ -955,11 +1019,12 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		}
 		scan_state->reader_initialized = true;
 	}
+	auto &column_ids = global_state.column_ids;
 	vector<idx_t> column_to_output;
-	if (!data_p.column_ids.empty()) {
+	if (!column_ids.empty()) {
 		column_to_output.assign(bind_data.return_types.size(), DConstants::INVALID_INDEX);
-		for (idx_t i = 0; i < data_p.column_ids.size(); i++) {
-			auto col_id = data_p.column_ids[i];
+		for (idx_t i = 0; i < column_ids.size(); i++) {
+			auto col_id = column_ids[i];
 			if (col_id != DConstants::INVALID_INDEX) {
 				column_to_output[col_id] = i;
 			}
@@ -969,6 +1034,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 	while (count < STANDARD_VECTOR_SIZE) {
 		ION_TYPE type = tid_NULL;
 		auto status = IERR_OK;
+		auto next_start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		if (bind_data.format == IonReadBindData::Format::ARRAY) {
 			if (!scan_state->array_initialized) {
 				status = ion_reader_next(scan_state->reader, &type);
@@ -1006,8 +1072,13 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				throw IOException("read_ion failed while reading next value");
 			}
 		}
+		if (profile) {
+			auto elapsed = std::chrono::steady_clock::now() - next_start;
+			scan_state->timing.next_nanos +=
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+		}
 		for (idx_t out_idx = 0; out_idx < output.ColumnCount(); out_idx++) {
-			auto col_id = data_p.column_ids.empty() ? out_idx : data_p.column_ids[out_idx];
+			auto col_id = column_ids.empty() ? out_idx : column_ids[out_idx];
 			if (col_id == DConstants::INVALID_INDEX) {
 				output.SetValue(out_idx, count, Value());
 			} else {
@@ -1027,6 +1098,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 			if (type != tid_STRUCT) {
 				throw InvalidInputException("read_ion expects records to be structs");
 			}
+			auto struct_start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 			if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
 				throw IOException("read_ion failed to step into struct");
 			}
@@ -1039,14 +1111,14 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				if (status != IERR_OK) {
 					throw IOException("read_ion failed while reading struct field");
 				}
-				ION_SYMBOL field_symbol = {};
+				ION_SYMBOL *field_symbol = nullptr;
 				if (ion_reader_get_field_name_symbol(scan_state->reader, &field_symbol) != IERR_OK) {
 					throw IOException("read_ion failed to read field name");
 				}
 				idx_t col_idx = 0;
 				bool have_col = false;
-				if (field_symbol.sid > 0) {
-					auto sid_it = scan_state->sid_map.find(field_symbol.sid);
+				if (field_symbol && field_symbol->sid > 0) {
+					auto sid_it = scan_state->sid_map.find(field_symbol->sid);
 					if (sid_it != scan_state->sid_map.end()) {
 						col_idx = sid_it->second;
 						have_col = true;
@@ -1054,8 +1126,8 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				}
 				if (!have_col) {
 					string name;
-					if (field_symbol.value && field_symbol.length > 0) {
-						name = string(reinterpret_cast<const char *>(field_symbol.value), field_symbol.length);
+					if (field_symbol && field_symbol->value.value && field_symbol->value.length > 0) {
+						name = string(reinterpret_cast<const char *>(field_symbol->value.value), field_symbol->value.length);
 					} else {
 						ION_STRING field_name;
 						field_name.value = nullptr;
@@ -1069,33 +1141,63 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					if (map_it != bind_data.name_map.end()) {
 						col_idx = map_it->second;
 						have_col = true;
-						if (field_symbol.sid > 0) {
-							scan_state->sid_map.emplace(field_symbol.sid, col_idx);
+						if (field_symbol && field_symbol->sid > 0) {
+							scan_state->sid_map.emplace(field_symbol->sid, col_idx);
 						}
 					}
 				}
 				if (have_col) {
 					auto out_idx = column_to_output.empty() ? col_idx : column_to_output[col_idx];
 					if (out_idx == DConstants::INVALID_INDEX) {
+						auto value_start =
+						    profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 						(void)IonReadValue(scan_state->reader, field_type);
+						if (profile) {
+							auto elapsed = std::chrono::steady_clock::now() - value_start;
+							scan_state->timing.value_nanos += static_cast<uint64_t>(
+							    std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+						}
 						continue;
 					}
 					auto &vec = output.data[out_idx];
 					auto target_type = bind_data.return_types[col_idx];
+					auto value_start =
+					    profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 					if (!ReadIonValueToVector(scan_state->reader, field_type, vec, count, target_type)) {
 						auto value = IonReadValue(scan_state->reader, field_type);
 						if (!value.IsNull()) {
 							output.SetValue(out_idx, count, value.DefaultCastAs(target_type));
 						}
 					}
+					if (profile) {
+						auto elapsed = std::chrono::steady_clock::now() - value_start;
+						scan_state->timing.value_nanos += static_cast<uint64_t>(
+						    std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+					}
 				} else {
+					auto value_start =
+					    profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 					(void)IonReadValue(scan_state->reader, field_type);
+					if (profile) {
+						auto elapsed = std::chrono::steady_clock::now() - value_start;
+						scan_state->timing.value_nanos += static_cast<uint64_t>(
+						    std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+					}
+				}
+				if (profile) {
+					scan_state->timing.fields++;
 				}
 			}
 			if (ion_reader_step_out(scan_state->reader) != IERR_OK) {
 				throw IOException("read_ion failed to step out of struct");
 			}
+			if (profile) {
+				auto elapsed = std::chrono::steady_clock::now() - struct_start;
+				scan_state->timing.struct_nanos +=
+				    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+			}
 		} else {
+			auto value_start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 			auto value = IonReadValue(scan_state->reader, type);
 			if (!value.IsNull()) {
 				auto out_idx = column_to_output.empty() ? 0 : column_to_output[0];
@@ -1103,10 +1205,22 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					output.SetValue(out_idx, count, value.DefaultCastAs(bind_data.return_types[0]));
 				}
 			}
+			if (profile) {
+				auto elapsed = std::chrono::steady_clock::now() - value_start;
+				scan_state->timing.value_nanos +=
+				    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+			}
+		}
+		if (profile) {
+			scan_state->timing.rows++;
 		}
 		count++;
 	}
 	output.SetCardinality(count);
+	if (profile && scan_state->finished && !scan_state->timing.reported && !local_state) {
+		scan_state->timing.reported = true;
+		ReportProfile(global_state, *scan_state);
+	}
 #endif
 }
 
@@ -1117,6 +1231,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	read_ion.named_parameters["columns"] = LogicalType::ANY;
 	read_ion.named_parameters["format"] = LogicalType::VARCHAR;
 	read_ion.named_parameters["records"] = LogicalType::ANY;
+	read_ion.named_parameters["profile"] = LogicalType::BOOLEAN;
 	read_ion.projection_pushdown = true;
 	read_ion.filter_pushdown = false;
 	read_ion.filter_prune = false;
