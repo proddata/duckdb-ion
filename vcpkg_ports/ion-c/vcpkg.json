@@ -1,0 +1,10 @@
+{
+  "name": "ion-c",
+  "version": "1.4.0",
+  "description": "Amazon Ion C implementation",
+  "homepage": "https://github.com/amzn/ion-c",
+  "license": "Apache-2.0",
+  "dependencies": [
+    "vcpkg-cmake-config"
+  ]
+}

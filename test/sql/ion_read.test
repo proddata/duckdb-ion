@@ -1,0 +1,12 @@
+# name: test/sql/ion_read.test
+# description: read_ion table function
+# group: [sql]
+
+require ion
+
+query I
+SELECT ion FROM read_ion('test/ion/sample.ion');
+----
+1
+two
+true
