@@ -108,6 +108,18 @@ SELECT category, COUNT(*)
 FROM read_json('$JSON_FILE')
 WHERE amount::DOUBLE > 5
 GROUP BY category;
+
+PRAGMA threads=4;
+
+PRAGMA profiling_output='$OUT_DIR/ion_count_nd_parallel.json';
+SELECT COUNT(*)
+FROM read_ion('$ION_FILE', format := 'newline_delimited');
+
+PRAGMA profiling_output='$OUT_DIR/ion_project_min_nd_parallel.json';
+SELECT id
+FROM read_ion('$ION_FILE', format := 'newline_delimited');
+
+PRAGMA threads=1;
 SQL
 
 "$DUCKDB_BIN" < "$SQL_FILE"

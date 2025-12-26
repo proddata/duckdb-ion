@@ -19,6 +19,9 @@
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/helper.hpp"
+#include <mutex>
 
 #ifdef DUCKDB_IONC
 #include <ionc/ion.h>
@@ -46,14 +49,19 @@ struct IonReadBindData : public TableFunctionData {
 	bool records = true;
 };
 
-struct IonReadGlobalState : public GlobalTableFunctionState {
+struct IonStreamState {
+	unique_ptr<FileHandle> handle;
+	QueryContext query_context;
+	vector<BYTE> buffer;
+	idx_t offset = 0;
+	idx_t end_offset = 0;
+	bool bounded = false;
+};
+
+struct IonReadScanState {
 #ifdef DUCKDB_IONC
 	ION_READER *reader = nullptr;
-	struct IonStreamState {
-		unique_ptr<FileHandle> handle;
-		QueryContext query_context;
-		vector<BYTE> buffer;
-	};
+	ION_READER_OPTIONS reader_options;
 	IonStreamState stream_state;
 	unordered_map<SID, idx_t> sid_map;
 #endif
@@ -61,7 +69,22 @@ struct IonReadGlobalState : public GlobalTableFunctionState {
 	bool array_initialized = false;
 	bool reader_initialized = false;
 
-	~IonReadGlobalState() override {
+	void ResetReader() {
+#ifdef DUCKDB_IONC
+		if (reader) {
+			ion_reader_close(reader);
+			reader = nullptr;
+		}
+#endif
+		reader_initialized = false;
+		array_initialized = false;
+		finished = false;
+#ifdef DUCKDB_IONC
+		sid_map.clear();
+#endif
+	}
+
+	~IonReadScanState() {
 #ifdef DUCKDB_IONC
 		if (reader) {
 			ion_reader_close(reader);
@@ -73,11 +96,30 @@ struct IonReadGlobalState : public GlobalTableFunctionState {
 	}
 };
 
+struct IonReadGlobalState : public GlobalTableFunctionState {
+	IonReadScanState scan_state;
+	mutex lock;
+	idx_t next_offset = 0;
+	idx_t file_size = 0;
+	idx_t chunk_size = 4 * 1024 * 1024;
+	idx_t max_threads = 1;
+	bool parallel_enabled = false;
+
+	idx_t MaxThreads() override {
+		return max_threads;
+	}
+};
+
+struct IonReadLocalState : public LocalTableFunctionState {
+	IonReadScanState scan_state;
+	bool range_assigned = false;
+};
+
 static iERR IonStreamHandler(ION_STREAM *pstream) {
 	if (!pstream || !pstream->handler_state) {
 		return IERR_EOF;
 	}
-	auto state = static_cast<IonReadGlobalState::IonStreamState *>(pstream->handler_state);
+	auto state = static_cast<IonStreamState *>(pstream->handler_state);
 	if (!state->handle) {
 		pstream->limit = nullptr;
 		return IERR_EOF;
@@ -85,11 +127,19 @@ static iERR IonStreamHandler(ION_STREAM *pstream) {
 	if (state->buffer.empty()) {
 		state->buffer.resize(64 * 1024);
 	}
-	auto read = state->handle->Read(state->query_context, state->buffer.data(), state->buffer.size());
+	auto remaining = state->bounded ? (state->end_offset > state->offset ? state->end_offset - state->offset : 0)
+	                                : state->buffer.size();
+	if (state->bounded && remaining == 0) {
+		pstream->limit = nullptr;
+		return IERR_EOF;
+	}
+	auto read_size = state->bounded ? MinValue<idx_t>(state->buffer.size(), remaining) : state->buffer.size();
+	auto read = state->handle->Read(state->query_context, state->buffer.data(), read_size);
 	if (read <= 0) {
 		pstream->limit = nullptr;
 		return IERR_EOF;
 	}
+	state->offset += static_cast<idx_t>(read);
 	pstream->curr = state->buffer.data();
 	pstream->limit = pstream->curr + read;
 	return IERR_OK;
@@ -149,8 +199,94 @@ static unique_ptr<GlobalTableFunctionState> IonReadInit(ClientContext &context, 
 	throw InvalidInputException("read_ion requires ion-c; rebuild with ion-c available");
 #else
 	auto &fs = FileSystem::GetFileSystem(context);
-	result->stream_state.handle = fs.OpenFile(bind_data.path, FileFlags::FILE_FLAGS_READ);
-	result->stream_state.query_context = QueryContext(context);
+	result->scan_state.stream_state.handle = fs.OpenFile(bind_data.path, FileFlags::FILE_FLAGS_READ);
+	result->scan_state.stream_state.query_context = QueryContext(context);
+	result->scan_state.reader_options = {};
+	result->scan_state.reader_options.skip_character_validation = TRUE;
+	result->file_size = result->scan_state.stream_state.handle->GetFileSize();
+	result->parallel_enabled = bind_data.format == IonReadBindData::Format::NEWLINE_DELIMITED && bind_data.records &&
+	                           result->scan_state.stream_state.handle->CanSeek();
+	if (result->parallel_enabled) {
+		auto &scheduler = TaskScheduler::GetScheduler(context);
+		result->max_threads = MaxValue<idx_t>(1, scheduler.NumberOfThreads());
+	} else {
+		result->max_threads = 1;
+	}
+#endif
+	return std::move(result);
+}
+
+static idx_t FindNextNewline(FileHandle &handle, QueryContext &context, idx_t start, idx_t file_size) {
+	const idx_t buffer_size = 64 * 1024;
+	vector<char> buffer(buffer_size);
+	idx_t offset = start;
+	while (offset < file_size) {
+		auto to_read = MinValue<idx_t>(buffer_size, file_size - offset);
+		handle.Read(context, buffer.data(), to_read, offset);
+		for (idx_t i = 0; i < to_read; i++) {
+			if (buffer[i] == '\n') {
+				return offset + i + 1;
+			}
+		}
+		offset += to_read;
+	}
+	return file_size;
+}
+
+static bool AssignIonRange(IonReadGlobalState &global_state, idx_t &start, idx_t &end) {
+	lock_guard<mutex> guard(global_state.lock);
+	if (global_state.next_offset >= global_state.file_size) {
+		return false;
+	}
+	start = global_state.next_offset;
+	auto provisional_end = MinValue<idx_t>(global_state.file_size, start + global_state.chunk_size);
+	if (provisional_end >= global_state.file_size) {
+		end = global_state.file_size;
+	} else {
+		end = FindNextNewline(*global_state.scan_state.stream_state.handle,
+		                      global_state.scan_state.stream_state.query_context, provisional_end,
+		                      global_state.file_size);
+	}
+	global_state.next_offset = end;
+	return start < end;
+}
+
+static bool InitializeIonRange(IonReadGlobalState &global_state, IonReadLocalState &local_state) {
+	idx_t start = 0;
+	idx_t end = 0;
+	if (!AssignIonRange(global_state, start, end)) {
+		return false;
+	}
+	local_state.scan_state.ResetReader();
+	local_state.scan_state.stream_state.offset = start;
+	local_state.scan_state.stream_state.end_offset = end;
+	local_state.scan_state.stream_state.bounded = true;
+	local_state.scan_state.stream_state.handle->Seek(start);
+	local_state.range_assigned = true;
+	return true;
+}
+
+static unique_ptr<LocalTableFunctionState> IonReadInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+                                                            GlobalTableFunctionState *global_state_p) {
+	if (!global_state_p) {
+		return nullptr;
+	}
+	auto &global_state = global_state_p->Cast<IonReadGlobalState>();
+	if (!global_state.parallel_enabled) {
+		return nullptr;
+	}
+	auto &bind_data = input.bind_data->Cast<IonReadBindData>();
+	auto result = make_uniq<IonReadLocalState>();
+#ifndef DUCKDB_IONC
+	throw InvalidInputException("read_ion requires ion-c; rebuild with ion-c available");
+#else
+	auto &fs = FileSystem::GetFileSystem(context.client);
+	result->scan_state.stream_state.handle = fs.OpenFile(bind_data.path, FileFlags::FILE_FLAGS_READ);
+	result->scan_state.stream_state.query_context = QueryContext(context.client);
+	result->scan_state.reader_options = global_state.scan_state.reader_options;
+	if (!InitializeIonRange(global_state, *result)) {
+		result->scan_state.finished = true;
+	}
 #endif
 	return std::move(result);
 }
@@ -590,11 +726,13 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
                            IonReadBindData::Format format, IonReadBindData::RecordsMode records_mode,
                            bool &records_out, ClientContext &context) {
 	ION_READER *reader = nullptr;
-	IonReadGlobalState::IonStreamState stream_state;
+	IonStreamState stream_state;
 	auto &fs = FileSystem::GetFileSystem(context);
 	stream_state.handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
 	stream_state.query_context = QueryContext(context);
-	auto status = ion_reader_open_stream(&reader, &stream_state, IonStreamHandler, nullptr);
+	ION_READER_OPTIONS reader_options = {};
+	reader_options.skip_character_validation = TRUE;
+	auto status = ion_reader_open_stream(&reader, &stream_state, IonStreamHandler, &reader_options);
 	if (status != IERR_OK) {
 		throw IOException("read_ion failed to open Ion reader for schema inference");
 	}
@@ -792,20 +930,30 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 }
 
 static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &state = data_p.global_state->Cast<IonReadGlobalState>();
-	if (state.finished) {
-		return;
+	auto &global_state = data_p.global_state->Cast<IonReadGlobalState>();
+	IonReadLocalState *local_state =
+	    data_p.local_state ? &data_p.local_state->Cast<IonReadLocalState>() : nullptr;
+	IonReadScanState *scan_state = local_state ? &local_state->scan_state : &global_state.scan_state;
+	if (scan_state->finished) {
+		if (local_state && InitializeIonRange(global_state, *local_state)) {
+			scan_state = &local_state->scan_state;
+		} else {
+			output.SetCardinality(0);
+			return;
+		}
 	}
 #ifndef DUCKDB_IONC
 	throw InvalidInputException("read_ion requires ion-c; rebuild with ion-c available");
 #else
 	auto &bind_data = data_p.bind_data->Cast<IonReadBindData>();
-	if (!state.reader_initialized) {
-		auto status = ion_reader_open_stream(&state.reader, &state.stream_state, IonStreamHandler, nullptr);
+	if (!scan_state->reader_initialized) {
+		auto status =
+		    ion_reader_open_stream(&scan_state->reader, &scan_state->stream_state, IonStreamHandler,
+		                           &scan_state->reader_options);
 		if (status != IERR_OK) {
 			throw IOException("read_ion failed to open Ion reader");
 		}
-		state.reader_initialized = true;
+		scan_state->reader_initialized = true;
 	}
 	vector<idx_t> column_to_output;
 	if (!data_p.column_ids.empty()) {
@@ -822,10 +970,10 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		ION_TYPE type = tid_NULL;
 		auto status = IERR_OK;
 		if (bind_data.format == IonReadBindData::Format::ARRAY) {
-			if (!state.array_initialized) {
-				status = ion_reader_next(state.reader, &type);
+			if (!scan_state->array_initialized) {
+				status = ion_reader_next(scan_state->reader, &type);
 				if (status == IERR_EOF || type == tid_EOF) {
-					state.finished = true;
+					scan_state->finished = true;
 					break;
 				}
 				if (status != IERR_OK) {
@@ -834,24 +982,24 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				if (type != tid_LIST) {
 					throw InvalidInputException("read_ion expects a top-level list when format='array'");
 				}
-				if (ion_reader_step_in(state.reader) != IERR_OK) {
+				if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
 					throw IOException("read_ion failed to step into list");
 				}
-				state.array_initialized = true;
+				scan_state->array_initialized = true;
 			}
-			status = ion_reader_next(state.reader, &type);
+			status = ion_reader_next(scan_state->reader, &type);
 			if (status == IERR_EOF || type == tid_EOF) {
-				ion_reader_step_out(state.reader);
-				state.finished = true;
+				ion_reader_step_out(scan_state->reader);
+				scan_state->finished = true;
 				break;
 			}
 			if (status != IERR_OK) {
 				throw IOException("read_ion failed while reading array element");
 			}
 		} else {
-			status = ion_reader_next(state.reader, &type);
+			status = ion_reader_next(scan_state->reader, &type);
 			if (status == IERR_EOF || type == tid_EOF) {
-				state.finished = true;
+				scan_state->finished = true;
 				break;
 			}
 			if (status != IERR_OK) {
@@ -867,7 +1015,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 			}
 		}
 		BOOL is_null = FALSE;
-		if (ion_reader_is_null(state.reader, &is_null) != IERR_OK) {
+		if (ion_reader_is_null(scan_state->reader, &is_null) != IERR_OK) {
 			throw IOException("read_ion failed while checking null status");
 		}
 		if (is_null) {
@@ -879,12 +1027,12 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 			if (type != tid_STRUCT) {
 				throw InvalidInputException("read_ion expects records to be structs");
 			}
-			if (ion_reader_step_in(state.reader) != IERR_OK) {
+			if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
 				throw IOException("read_ion failed to step into struct");
 			}
 			while (true) {
 				ION_TYPE field_type = tid_NULL;
-				status = ion_reader_next(state.reader, &field_type);
+				status = ion_reader_next(scan_state->reader, &field_type);
 				if (status == IERR_EOF || field_type == tid_EOF) {
 					break;
 				}
@@ -892,14 +1040,14 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					throw IOException("read_ion failed while reading struct field");
 				}
 				ION_SYMBOL field_symbol = {};
-				if (ion_reader_get_field_name_symbol(state.reader, &field_symbol) != IERR_OK) {
+				if (ion_reader_get_field_name_symbol(scan_state->reader, &field_symbol) != IERR_OK) {
 					throw IOException("read_ion failed to read field name");
 				}
 				idx_t col_idx = 0;
 				bool have_col = false;
 				if (field_symbol.sid > 0) {
-					auto sid_it = state.sid_map.find(field_symbol.sid);
-					if (sid_it != state.sid_map.end()) {
+					auto sid_it = scan_state->sid_map.find(field_symbol.sid);
+					if (sid_it != scan_state->sid_map.end()) {
 						col_idx = sid_it->second;
 						have_col = true;
 					}
@@ -912,7 +1060,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 						ION_STRING field_name;
 						field_name.value = nullptr;
 						field_name.length = 0;
-						if (ion_reader_get_field_name(state.reader, &field_name) != IERR_OK) {
+						if (ion_reader_get_field_name(scan_state->reader, &field_name) != IERR_OK) {
 							throw IOException("read_ion failed to read field name");
 						}
 						name = string(reinterpret_cast<const char *>(field_name.value), field_name.length);
@@ -922,33 +1070,33 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 						col_idx = map_it->second;
 						have_col = true;
 						if (field_symbol.sid > 0) {
-							state.sid_map.emplace(field_symbol.sid, col_idx);
+							scan_state->sid_map.emplace(field_symbol.sid, col_idx);
 						}
 					}
 				}
 				if (have_col) {
 					auto out_idx = column_to_output.empty() ? col_idx : column_to_output[col_idx];
 					if (out_idx == DConstants::INVALID_INDEX) {
-						(void)IonReadValue(state.reader, field_type);
+						(void)IonReadValue(scan_state->reader, field_type);
 						continue;
 					}
 					auto &vec = output.data[out_idx];
 					auto target_type = bind_data.return_types[col_idx];
-					if (!ReadIonValueToVector(state.reader, field_type, vec, count, target_type)) {
-						auto value = IonReadValue(state.reader, field_type);
+					if (!ReadIonValueToVector(scan_state->reader, field_type, vec, count, target_type)) {
+						auto value = IonReadValue(scan_state->reader, field_type);
 						if (!value.IsNull()) {
 							output.SetValue(out_idx, count, value.DefaultCastAs(target_type));
 						}
 					}
 				} else {
-					(void)IonReadValue(state.reader, field_type);
+					(void)IonReadValue(scan_state->reader, field_type);
 				}
 			}
-			if (ion_reader_step_out(state.reader) != IERR_OK) {
+			if (ion_reader_step_out(scan_state->reader) != IERR_OK) {
 				throw IOException("read_ion failed to step out of struct");
 			}
 		} else {
-			auto value = IonReadValue(state.reader, type);
+			auto value = IonReadValue(scan_state->reader, type);
 			if (!value.IsNull()) {
 				auto out_idx = column_to_output.empty() ? 0 : column_to_output[0];
 				if (out_idx != DConstants::INVALID_INDEX) {
@@ -964,7 +1112,8 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 
 static void LoadInternal(ExtensionLoader &loader) {
 	RegisterIonScalarFunctions(loader);
-	TableFunction read_ion("read_ion", {LogicalType::VARCHAR}, IonReadFunction, IonReadBind, IonReadInit);
+	TableFunction read_ion("read_ion", {LogicalType::VARCHAR}, IonReadFunction, IonReadBind, IonReadInit,
+	                       IonReadInitLocal);
 	read_ion.named_parameters["columns"] = LogicalType::ANY;
 	read_ion.named_parameters["format"] = LogicalType::VARCHAR;
 	read_ion.named_parameters["records"] = LogicalType::ANY;

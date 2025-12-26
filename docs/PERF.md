@@ -64,3 +64,7 @@ You can run the standard set with:
 - Consider `ION_READER_OPTIONS.skip_character_validation` for trusted data.
 - Avoid string round-trips for decimals/timestamps by decoding Ion primitives directly.
 - Parallelize newline-delimited scans to better utilize threads.
+
+## Parallel Scan Notes
+- Parallel scans currently only apply when `format='newline_delimited'` and the file is seekable.
+- Use `PRAGMA threads=<n>;` to force multiple threads during benchmarks.
