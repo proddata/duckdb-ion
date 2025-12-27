@@ -33,7 +33,6 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
-#include <string_view>
 
 #ifdef DUCKDB_IONC
 #include <ionc/ion.h>
@@ -152,18 +151,6 @@ struct IonReadScanState {
 	}
 };
 
-struct StringViewHash {
-	size_t operator()(const std::string_view &value) const {
-		return std::hash<std::string_view> {}(value);
-	}
-};
-
-struct StringViewEqual {
-	bool operator()(const std::string_view &left, const std::string_view &right) const {
-		return left == right;
-	}
-};
-
 struct IonReadGlobalState : public GlobalTableFunctionState {
 	IonReadScanState scan_state;
 	mutex lock;
@@ -176,7 +163,7 @@ struct IonReadGlobalState : public GlobalTableFunctionState {
 	idx_t inflight_ranges = 0;
 	IonReadScanState::Timing aggregate_timing;
 	idx_t projected_columns = 0;
-	unordered_map<std::string_view, idx_t, StringViewHash, StringViewEqual> name_view_map;
+	unordered_map<string, idx_t> name_view_map;
 
 	idx_t MaxThreads() const override {
 		return max_threads;
@@ -796,13 +783,13 @@ static unique_ptr<GlobalTableFunctionState> IonReadInit(ClientContext &context, 
 	if (all_columns) {
 		result->name_view_map.reserve(bind_data.names.size());
 		for (idx_t i = 0; i < bind_data.names.size(); i++) {
-			result->name_view_map.emplace(std::string_view(bind_data.names[i]), i);
+			result->name_view_map.emplace(bind_data.names[i], i);
 		}
 	} else {
 		result->name_view_map.reserve(result->column_ids.size());
 		for (auto col_id : result->column_ids) {
 			if (col_id != DConstants::INVALID_INDEX) {
-				result->name_view_map.emplace(std::string_view(bind_data.names[col_id]), col_id);
+				result->name_view_map.emplace(bind_data.names[col_id], col_id);
 			}
 		}
 	}
@@ -2325,8 +2312,8 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 						}
 					}
 					const auto name_ptr = field_value.value ? reinterpret_cast<const char *>(field_value.value) : "";
-					auto name_view = std::string_view(name_ptr, field_value.length);
-					auto map_it = global_state.name_view_map.find(name_view);
+					auto name_key = string(name_ptr, field_value.length);
+					auto map_it = global_state.name_view_map.find(name_key);
 					if (map_it != global_state.name_view_map.end()) {
 						col_idx = map_it->second;
 						have_col = true;
