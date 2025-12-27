@@ -1,6 +1,10 @@
 # DuckDB Ion Extension
 
-This repository implements a DuckDB extension for reading (and eventually writing) AWS Ion data. It is based on the DuckDB extension template (`docs/TEMPLATE_README.md`) and is intended for eventual distribution via community extensions.
+[![Main Extension Distribution Pipeline](https://github.com/proddata/duckdb-ion/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/proddata/duckdb-ion/actions/workflows/MainDistributionPipeline.yml)
+![GitHub License](https://img.shields.io/github/license/proddata/duckdb-ion)
+
+
+This repository implements a DuckDB extension for reading and writing AWS Ion data. It is based on the DuckDB extension template (`docs/TEMPLATE_README.md`) and is intended for eventual distribution via community extensions.
 
 ## Status
 - `read_ion(path)` reads newline-delimited Ion structs and maps fields to columns using schema inference.
@@ -48,6 +52,34 @@ The repo uses a local vcpkg overlay in `vcpkg_ports/`.
 ./build/release/duckdb
 ./build/release/test/unittest
 ./build/release/extension/ion/ion.duckdb_extension
+```
+
+### Updating Submodules
+DuckDB extensions use two submodules that are included in your forked extension repo when you use the `--recurse-submodules` flag. These modules are:
+
+| Name                  | Repository                                      | Description |
+|-----------------------|-------------------------------------------------|-------------|
+| duckdb                | https://github.com/duckdb/duckdb                | This repository contains core DuckDB code required for building extensions.            |
+| extension-ci-tools    | https://github.com/duckdb/extension-ci-tools    | This repository contains reusable components for building, testing and deploying DuckDB extensions.            |
+
+
+> [!IMPORTANT]  
+> It is recommended that you update your submodules at least once every other major LTS release to avoid CI/CD pipeline build errors caused by remaining pinned to a stale commit of these submodules.
+
+To update all submodules to the latest commit hash:
+```bash
+git submodule update --init --recursive
+```
+
+To update your submodules to a specific commit hash, for example to update duckdb to the hash `8e146474d7adb960c5a2941142fe4482cc7dfc08`:
+```bash
+cd duckdb 
+git fetch --all
+git checkout 8e146474d7adb960c5a2941142fe4482cc7dfc08   # or any tag/branch/commit hash
+cd ..
+git add duckdb
+git commit -m "Pin DuckDB submodule to cc7dfc08"
+git push HEAD:update-submodule-branch
 ```
 
 ## Running

@@ -75,6 +75,7 @@ jobs:
           make test
 
       - name: Format Check
+        if: matrix.arch == 'x64'
         run: |
           python3 -m venv .venv
           . .venv/bin/activate
@@ -82,6 +83,7 @@ jobs:
           PATH="${{ github.workspace }}/.venv/bin:$PATH" make format-check
 
       - name: Tidy Check
+        if: matrix.arch == 'x64'
         run: |
           . .venv/bin/activate
           python -m pip install clang-tidy
