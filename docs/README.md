@@ -9,11 +9,10 @@ This repository implements a DuckDB extension for reading and writing AWS Ion da
 ## Status
 - `read_ion(path)` reads newline-delimited Ion structs and maps fields to columns using schema inference.
 - `read_ion(path, columns := {field: 'TYPE', ...})` uses an explicit schema and skips inference.
-- `read_ion(path, records := 'false')` reads scalar values into a single `ion` column.
+- `read_ion(path, records := false)` reads scalar values into a single `ion` column.
 - `read_ion(path, format := 'array')` reads from a top-level Ion list (array) instead of top-level values.
 - Nested Ion structs and lists are supported and map to DuckDB `STRUCT` and `LIST` types.
 - Binary Ion is supported when input starts with the Ion version marker.
-- Complex types (list/struct) and richer binary support are planned next.
 
 ## Parameters
 `read_ion` accepts a single file path, a glob (e.g., `test/ion/*.ion`), or a list of paths.
@@ -149,6 +148,7 @@ Notes:
 ## Installing (Unsigned)
 If you are loading a local or custom build, you may need `allow_unsigned_extensions`:
 ```sql
+SET allow_unsigned_extensions=true;
 INSTALL ion;
 LOAD ion;
 ```
