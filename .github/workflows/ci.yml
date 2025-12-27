@@ -10,15 +10,27 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux
-    runs-on: ubuntu-latest
+    name: Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x64
+            vcpkg_triplet: x64-linux
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            vcpkg_triplet: arm64-linux
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: 'true'
       CCACHE_MAXSIZE: 400M
       CCACHE_BASEDIR: ${{ github.workspace }}
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
-      VCPKG_TARGET_TRIPLET: x64-linux
+      VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
       GEN: ninja
     steps:
       - uses: actions/checkout@v4
@@ -78,9 +90,35 @@ jobs:
             VCPKG_TARGET_TRIPLET="x64-linux" \
             make tidy-check
 
+      - name: Package extension
+        if: startsWith(github.ref, 'refs/tags/')
+        id: package
+        run: |
+          asset="ion-${{ runner.os }}-${{ matrix.arch }}-${{ github.ref_name }}.tar.gz"
+          tar -czf "${asset}" -C build/release/extension/ion ion.duckdb_extension
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset }}
+
   macos:
-    name: MacOS
-    runs-on: macos-latest
+    name: MacOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x64
+            vcpkg_triplet: x64-osx
+          - runner: macos-14
+            arch: arm64
+            vcpkg_triplet: arm64-osx
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: 'true'
@@ -128,7 +166,7 @@ jobs:
 
       - name: Build
         run: |
-          VCPKG_TARGET_TRIPLET="$(uname -m)-osx" make
+          VCPKG_TARGET_TRIPLET="${{ matrix.vcpkg_triplet }}" make
 
       - name: Test
         run: |
@@ -147,5 +185,19 @@ jobs:
           python -m pip install clang-tidy
           PATH="${{ github.workspace }}/.venv/bin:$PATH" \
             VCPKG_TOOLCHAIN_PATH="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-            VCPKG_TARGET_TRIPLET="$(uname -m)-osx" \
+            VCPKG_TARGET_TRIPLET="${{ matrix.vcpkg_triplet }}" \
             make tidy-check
+
+      - name: Package extension
+        if: startsWith(github.ref, 'refs/tags/')
+        id: package
+        run: |
+          asset="ion-${{ runner.os }}-${{ matrix.arch }}-${{ github.ref_name }}.tar.gz"
+          tar -czf "${asset}" -C build/release/extension/ion ion.duckdb_extension
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset }}
