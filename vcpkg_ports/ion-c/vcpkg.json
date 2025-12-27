@@ -1,6 +1,6 @@
 {
   "name": "ion-c",
-  "version": "1.4.0",
+  "version": "1.1.4",
   "description": "Amazon Ion C implementation",
   "homepage": "https://github.com/amzn/ion-c",
   "license": "Apache-2.0",

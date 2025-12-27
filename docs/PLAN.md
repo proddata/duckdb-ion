@@ -46,7 +46,9 @@ Deliver a first proof-of-concept DuckDB extension that reads AWS Ion (text and b
 - Expand "fast projection" to use the map for any projected count (not just <=3 columns).
 
 ### Phase 2: Extractor Expansion
-- Increase ion-c extractor threshold beyond <=3 columns and validate correctness.
+- Limit extractor usage to depth 0 with the reader **before first value** (ion-c expects to drive `ion_reader_next`).
+- Avoid nested path reliance; `match_relative_paths` does not fire when stepped into structs in our repro.
+- A zero-length path at depth>0 only enables match-all + callback filtering (minimal pruning).
 - Add a fallback path when extractor fails to resolve field names or missing fields.
 
 ### Phase 3: Batch Transform

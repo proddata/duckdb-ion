@@ -68,10 +68,10 @@ Ion vs JSON ratios are computed as `Ion / JSON` using the profile JSON fields (`
 
 | Query | Ion CPU | JSON CPU | CPU Ratio | Ion Latency | JSON Latency | Latency Ratio |
 | --- | --- | --- | --- | --- | --- | --- |
-| COUNT(*) | 0.945s | 0.295s | 3.20x | 0.949s | 0.054s | 17.4x |
-| Project 3 cols | 1.210s | 0.345s | 3.50x | 1.221s | 0.060s | 20.2x |
-| Filter + group | 1.199s | 0.341s | 3.51x | 1.201s | 0.059s | 20.5x |
-| Wide schema (4 cols) | 7.460s | 2.027s | 3.68x | 7.478s | 0.285s | 26.2x |
+| COUNT(*) | 2.144s | 0.433s | 4.96x | 2.147s | 0.075s | 28.69x |
+| Project 3 cols | 2.104s | 0.434s | 4.85x | 2.116s | 0.072s | 29.42x |
+| Filter + group | 2.086s | 0.342s | 6.10x | 2.092s | 0.059s | 35.17x |
+| Wide schema (4 cols) | 8.765s | 2.838s | 3.09x | 8.782s | 0.375s | 23.42x |
 
 Sources:
 - `perf/results/ion_count.json`, `perf/results/json_count.json`
@@ -82,6 +82,22 @@ Sources:
 Notes:
 - Total bytes read are similar between Ion and JSON; the gap is dominated by parsing and value materialization cost.
 - Parallel newline-delimited runs are tracked separately (`*_nd_parallel.json`) and are not included above.
+
+## Profiling Insights (2M Rows)
+Internal `read_ion` profiling (`profile := true`) shows the hottest areas are reader traversal and struct iteration,
+not value conversion. Example on `perf/data/data.ion`:
+
+- `SELECT COUNT(*) FROM read_ion(..., profile := true)` (projected `id` only):
+  - `next_ms ~1076`, `struct_ms ~945`, `value_ms ~37`
+  - 2M rows, 2M fields visited (early exit after `id`)
+- `SELECT id, category, amount::DOUBLE FROM read_ion(..., profile := true)`:
+  - `next_ms ~727`, `struct_ms ~1434`, `value_ms ~233`
+  - 2M rows, 6M fields visited
+
+Takeaways:
+- Field traversal + name/SID resolution dominate (`next_ms` + `struct_ms`).
+- Value conversion is comparatively small when vector paths succeed.
+- Narrow projections still pay per-field traversal until all projected fields are seen.
 ## Key Takeaways
 - Text Ion remains ~3–4x slower than JSON on CPU and much slower on latency, pointing to per-row materialization overhead.
 - Binary Ion is competitive (or faster) on CPU versus JSON text for comparable queries, but latency still lags.
@@ -94,10 +110,10 @@ Binary Ion files are generated from the text files using `scripts/ion_text_to_bi
 
 | Query | Text CPU | Binary CPU | Speedup | Text Latency | Binary Latency | Speedup |
 | --- | --- | --- | --- | --- | --- | --- |
-| COUNT(*) | 0.945s | 0.120s | 7.88x | 0.949s | 0.122s | 7.81x |
-| Project 3 cols | 1.210s | 0.442s | 2.74x | 1.221s | 0.449s | 2.72x |
-| Wide COUNT(*) | 5.302s | 0.148s | 35.8x | 5.312s | 0.155s | 34.3x |
-| Wide project (4 cols) | 7.460s | 1.581s | 4.72x | 7.478s | 1.595s | 4.69x |
+| COUNT(*) | 2.144s | 0.790s | 2.72x | 2.147s | 0.791s | 2.71x |
+| Project 3 cols | 2.104s | 1.139s | 1.85x | 2.116s | 1.146s | 1.85x |
+| Wide COUNT(*) | 7.288s | 0.870s | 8.38x | 7.296s | 0.874s | 8.35x |
+| Wide project (4 cols) | 8.765s | 2.305s | 3.80x | 8.782s | 2.316s | 3.79x |
 
 Sources:
 - `perf/results/ion_count.json`, `perf/results/ion_count_binary.json`

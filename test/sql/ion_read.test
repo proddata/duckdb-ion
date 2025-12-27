@@ -117,6 +117,62 @@ high	x
 7	{'k': 1}
 
 query I
+SELECT typeof(obj)
+FROM read_ion('test/ion/struct_sparse.ion', field_appearance_threshold := 0.8)
+LIMIT 1;
+----
+MAP(VARCHAR, BIGINT)
+
+query I
+SELECT typeof(obj)
+FROM read_ion('test/ion/struct_sparse.ion', field_appearance_threshold := 0.8, map_inference_threshold := -1)
+LIMIT 1;
+----
+STRUCT(a BIGINT, b BIGINT)
+
+query I
+SELECT typeof(obj)
+FROM read_ion('test/ion/struct_map.ion', map_inference_threshold := 2)
+LIMIT 1;
+----
+MAP(VARCHAR, BIGINT)
+
+query I
+SELECT typeof(nested)
+FROM read_ion('test/ion/nested.ion', maximum_depth := 1)
+LIMIT 1;
+----
+STRUCT("name" VARCHAR, score VARCHAR)
+
+query I
+SELECT COUNT(*)
+FROM read_ion('test/ion/multi_[12].ion');
+----
+3
+
+query I
+SELECT COUNT(*)
+FROM read_ion(['test/ion/multi_1.ion', 'test/ion/multi_2.ion']);
+----
+3
+
+query II
+SELECT typeof(a), typeof(b)
+FROM read_ion(['test/ion/multi_union_1.ion', 'test/ion/multi_union_2.ion'], union_by_name := true)
+LIMIT 1;
+----
+BIGINT	BIGINT
+
+query I
+SELECT COUNT(*)
+FROM read_ion(['test/ion/multi_union_1.ion', 'test/ion/multi_union_2.ion'],
+              union_by_name := true,
+              maximum_sample_files := 1,
+              sample_size := 1);
+----
+2
+
+query I
 SELECT ion FROM read_ion('test/ion/scalars_binary.ion', records := false);
 ----
 1
@@ -167,6 +223,145 @@ SELECT COUNT(*) FROM (
     SELECT * FROM read_ion('test/ion/array_binary.ion', format := 'array')
     EXCEPT ALL
     SELECT * FROM read_ion('test/ion/array_text.ion', format := 'array')
+);
+----
+0
+
+query I
+SELECT typeof(ion) FROM read_ion('test/ion/bools_text.ion', records := false) LIMIT 1;
+----
+BOOLEAN
+
+query I
+SELECT typeof(ion) FROM read_ion('test/ion/floats_text.ion', records := false) LIMIT 1;
+----
+DOUBLE
+
+query I
+SELECT hex(ion) FROM read_ion('test/ion/blobs_text.ion', records := false);
+----
+010203
+040506
+
+query I
+SELECT typeof(ion) FROM read_ion('test/ion/lists_text.ion', records := false) LIMIT 1;
+----
+BIGINT[]
+
+query I
+SELECT typeof(name) FROM read_ion('test/ion/structs_name_int_text.ion') LIMIT 1;
+----
+BIGINT
+
+query I
+SELECT typeof(name) FROM read_ion('test/ion/structs_name_list_text.ion') LIMIT 1;
+----
+BIGINT[]
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/bools_text.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/bools_binary.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/bools_binary.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/bools_text.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/floats_text.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/floats_binary.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/floats_binary.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/floats_text.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/blobs_text.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/blobs_binary.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/blobs_binary.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/blobs_text.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/lists_text.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/lists_binary.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/lists_binary.ion', records := false)
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/lists_text.ion', records := false)
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_name_int_text.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_name_int_binary.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_name_int_binary.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_name_int_text.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_name_list_text.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_name_list_binary.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_name_list_binary.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_name_list_text.ion')
 );
 ----
 0

@@ -55,10 +55,13 @@ the biggest optimization opportunities likely sit. It focuses on the ingestion p
 - Binary Ion dramatically reduces `struct_ms`, reinforcing that text traversal/name resolution is the hotspot.
 
 ## Ion Extractor Findings (2025-02)
-- A standalone repro in `scripts/ion_extractor_repro.cpp` shows callbacks fire at depth 0 for a struct field path.
-- Callbacks do **not** fire when the reader is stepped into the struct (depth 1), even with
-  `match_relative_paths = true`.
-- `read_ion` steps into structs before reading fields, so extractor matching currently yields NULLs.
+- A standalone repro in `scripts/ion_extractor_repro.cpp` shows callbacks fire when the reader is **before first value**
+  at depth 0 (ion-c expects `ion_extractor_match` to drive `ion_reader_next` internally).
+- If the reader is already positioned on a value (`ion_reader_next` called) or stepped into a struct (depth 1),
+  callbacks do **not** fire, even with `match_relative_paths = true`.
+- A zero-length path at depth>0 does fire, but only as a **match-all**; field-level filtering must then happen in the
+  callback, which removes most pruning benefit.
+- `read_ion` steps into structs before reading fields, so extractor matching is unreliable beyond depth 0.
 - Extractor usage is disabled by default; it can be forced for experiments via `use_extractor := true`.
 
 ## Next Implementation Sketch
@@ -66,8 +69,8 @@ the biggest optimization opportunities likely sit. It focuses on the ingestion p
   - Build a per-scan hash map from field name -> column index (similar to JSON key map) for projections.
   - Prefer SID lookups; cache name-to-col misses to avoid repeated string work.
 - **Phase 2: Extractor expansion**
-  - Enable ion-c extractor for larger projected column sets (configurable threshold).
-  - Validate extractor correctness for nested structs and missing fields.
+  - Consider enabling ion-c extractor for larger projected column sets only at depth 0 (before-first reader state).
+  - Avoid relying on extractor for nested paths; use key map + SID lookup or a two-pass approach.
 - **Phase 3: Batch transform**
   - Accumulate per-column arrays of Ion values per batch and materialize in vectorized loops.
   - Align conversion logic with JSON's `TransformObject` pattern for predictable costs.

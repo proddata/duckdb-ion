@@ -12,14 +12,24 @@ This repository implements a DuckDB extension for reading (and eventually writin
 - Complex types (list/struct) and richer binary support are planned next.
 
 ## Parameters
+`read_ion` accepts a single file path, a glob (e.g., `test/ion/*.ion`), or a list of paths.
 - `columns`: struct of `name: 'SQLTYPE'` pairs; skips inference and uses that schema. Nested types are supported (e.g., `STRUCT(name VARCHAR)` or `INTEGER[]`).
 - `format`: `'auto'` (default), `'newline_delimited'`, `'array'`, or `'unstructured'`.
 - `records`: `'auto'` (default), `'true'`, `'false'`, or a BOOLEAN.
+- `maximum_depth`: maximum nested depth to infer; `-1` means unlimited.
+- `field_appearance_threshold`: when inferring structs, if average field appearance falls below this threshold, infer `MAP` instead of `STRUCT`.
+- `map_inference_threshold`: if a struct has at least this many fields and types are similar, infer `MAP`; `-1` disables map inference.
+- `sample_size`: number of values to sample for schema inference; `-1` means sample all input.
+- `maximum_sample_files`: cap on files sampled during schema inference; `-1` removes the cap.
+- `union_by_name`: when reading multiple files, infer the schema from all files instead of the first file only.
 - `use_extractor`: BOOLEAN (default `false`). Experimental projection path using ion-c extractors; currently unreliable for record structs and intended for debugging only.
 - You can combine `format` with `records` (e.g., `format := 'array', records := 'false'`). `columns` requires `records=true`.
 - When input structs have different fields, the schema is the union of field names and missing fields are returned as NULL.
 - Type conflicts are promoted across rows (e.g., INT + DOUBLE → DOUBLE, mixed types → VARCHAR, nested fields are merged).
 - Ion DECIMAL values are inferred as DOUBLE unless an explicit `columns` schema is provided.
+- `use_extractor` note: ion-c extractors currently only fire callbacks at depth 0 in our repro; when `read_ion`
+  steps into a struct (depth 1), callbacks do not fire even with `match_relative_paths=true`. Use only for
+  experiments; see `docs/ION_JSON_COMPARISON.md` for details.
 
 ## Building
 ### Dependencies

@@ -27,6 +27,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/limits.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -49,7 +51,7 @@
 namespace duckdb {
 
 struct IonReadBindData : public TableFunctionData {
-	string path;
+	vector<string> paths;
 	vector<LogicalType> return_types;
 	vector<string> names;
 	unordered_map<string, idx_t> name_map;
@@ -57,6 +59,12 @@ struct IonReadBindData : public TableFunctionData {
 	enum class RecordsMode { AUTO, ENABLED, DISABLED };
 	Format format = Format::AUTO;
 	RecordsMode records_mode = RecordsMode::AUTO;
+	idx_t max_depth = NumericLimits<idx_t>::Maximum();
+	double field_appearance_threshold = 0.1;
+	idx_t map_inference_threshold = 200;
+	idx_t sample_size = idx_t(STANDARD_VECTOR_SIZE) * 10;
+	idx_t maximum_sample_files = 32;
+	bool union_by_name = false;
 	bool records = true;
 	bool profile = false;
 	bool use_extractor = false;
@@ -81,6 +89,7 @@ struct IonReadScanState {
 	vector<idx_t> extractor_cols;
 	bool extractor_ready = false;
 #endif
+	idx_t file_index = 0;
 	bool finished = false;
 	bool array_initialized = false;
 	bool reader_initialized = false;
@@ -212,23 +221,34 @@ static iERR IonStreamHandler(struct _ion_user_stream *pstream) {
 	return IERR_OK;
 }
 
-static void InferIonSchema(const string &path, vector<string> &names, vector<LogicalType> &types,
+static void InferIonSchema(const vector<string> &paths, vector<string> &names, vector<LogicalType> &types,
                            IonReadBindData::Format format, IonReadBindData::RecordsMode records_mode,
-                           bool &records_out, ClientContext &context);
+                           idx_t max_depth, double field_appearance_threshold, idx_t map_inference_threshold,
+                           idx_t sample_size, idx_t maximum_sample_files, bool &records_out, ClientContext &context);
 static void ParseColumnsParameter(ClientContext &context, const Value &value, vector<string> &names,
                                   vector<LogicalType> &types);
 static void ParseFormatParameter(const Value &value, IonReadBindData::Format &format);
 static void ParseRecordsParameter(const Value &value, IonReadBindData::RecordsMode &records_mode);
+static void ParseMaxDepthParameter(const Value &value, idx_t &max_depth);
+static void ParseFieldAppearanceThresholdParameter(const Value &value, double &field_appearance_threshold);
+static void ParseMapInferenceThresholdParameter(const Value &value, idx_t &map_inference_threshold);
+static void ParseSampleSizeParameter(const Value &value, idx_t &sample_size);
+static void ParseMaximumSampleFilesParameter(const Value &value, idx_t &maximum_sample_files);
+static void ParseUnionByNameParameter(const Value &value, bool &union_by_name);
 static void ParseProfileParameter(const Value &value, bool &profile);
 static void ParseUseExtractorParameter(const Value &value, bool &use_extractor);
+static vector<string> ParseIonPaths(ClientContext &context, const Value &value);
 
 static unique_ptr<FunctionData> IonReadBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<string> &names) {
 	if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
-		throw InvalidInputException("read_ion expects a single, non-null file path");
+		throw InvalidInputException("read_ion expects a single, non-null file path or list of paths");
 	}
 	auto bind_data = make_uniq<IonReadBindData>();
-	bind_data->path = StringValue::Get(input.inputs[0].CastAs(context, LogicalType::VARCHAR));
+	bind_data->paths = ParseIonPaths(context, input.inputs[0]);
+	if (bind_data->paths.empty()) {
+		throw InvalidInputException("read_ion could not expand any input paths");
+	}
 	for (auto &kv : input.named_parameters) {
 		if (kv.second.IsNull()) {
 			throw BinderException("read_ion does not allow NULL named parameters");
@@ -240,6 +260,18 @@ static unique_ptr<FunctionData> IonReadBind(ClientContext &context, TableFunctio
 			ParseFormatParameter(kv.second, bind_data->format);
 		} else if (option == "records") {
 			ParseRecordsParameter(kv.second, bind_data->records_mode);
+		} else if (option == "maximum_depth") {
+			ParseMaxDepthParameter(kv.second, bind_data->max_depth);
+		} else if (option == "field_appearance_threshold") {
+			ParseFieldAppearanceThresholdParameter(kv.second, bind_data->field_appearance_threshold);
+		} else if (option == "map_inference_threshold") {
+			ParseMapInferenceThresholdParameter(kv.second, bind_data->map_inference_threshold);
+		} else if (option == "sample_size") {
+			ParseSampleSizeParameter(kv.second, bind_data->sample_size);
+		} else if (option == "maximum_sample_files") {
+			ParseMaximumSampleFilesParameter(kv.second, bind_data->maximum_sample_files);
+		} else if (option == "union_by_name") {
+			ParseUnionByNameParameter(kv.second, bind_data->union_by_name);
 		} else if (option == "profile") {
 			ParseProfileParameter(kv.second, bind_data->profile);
 		} else if (option == "use_extractor") {
@@ -252,8 +284,14 @@ static unique_ptr<FunctionData> IonReadBind(ClientContext &context, TableFunctio
 		throw BinderException("read_ion cannot use \"columns\" when records=false");
 	}
 	if (bind_data->names.empty()) {
-		InferIonSchema(bind_data->path, bind_data->names, bind_data->return_types, bind_data->format,
-		               bind_data->records_mode, bind_data->records, context);
+		auto schema_paths = bind_data->paths;
+		if (!bind_data->union_by_name && !schema_paths.empty()) {
+			schema_paths.resize(1);
+		}
+		InferIonSchema(schema_paths, bind_data->names, bind_data->return_types, bind_data->format,
+		               bind_data->records_mode, bind_data->max_depth, bind_data->field_appearance_threshold,
+		               bind_data->map_inference_threshold, bind_data->sample_size,
+		               bind_data->maximum_sample_files, bind_data->records, context);
 	} else {
 		bind_data->records = true;
 	}
@@ -270,10 +308,417 @@ static LogicalType NormalizeInferredIonType(const LogicalType &type);
 static Value IonReadValue(ION_READER *reader, ION_TYPE type);
 static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector &vector, idx_t row,
                                  const LogicalType &target_type);
+static inline void SkipIonValue(ION_READER *reader, ION_TYPE type);
 static iERR IonExtractorCallback(hREADER reader, hPATH matched_path, void *user_context,
                                  ION_EXTRACTOR_CONTROL *p_control);
 #ifdef DUCKDB_IONC
 #endif
+
+struct IonStructureOptions {
+	idx_t max_depth;
+	double field_appearance_threshold;
+	idx_t map_inference_threshold;
+};
+
+struct IonStructureNode {
+	idx_t count = 0;
+	idx_t null_count = 0;
+	bool inconsistent = false;
+	LogicalTypeId type = LogicalTypeId::INVALID;
+	vector<IonStructureNode> children;
+	vector<string> child_names;
+	unordered_map<string, idx_t> child_index;
+
+	IonStructureNode &GetListChild() {
+		if (children.empty()) {
+			children.emplace_back();
+		}
+		return children[0];
+	}
+
+	IonStructureNode &GetStructChild(const string &name) {
+		auto it = child_index.find(name);
+		if (it != child_index.end()) {
+			return children[it->second];
+		}
+		auto idx = children.size();
+		child_index.emplace(name, idx);
+		child_names.push_back(name);
+		children.emplace_back();
+		return children.back();
+	}
+};
+
+static LogicalTypeId IonTypeToLogicalTypeId(ION_TYPE type) {
+	switch (ION_TYPE_INT(type)) {
+	case tid_BOOL_INT:
+		return LogicalTypeId::BOOLEAN;
+	case tid_INT_INT:
+		return LogicalTypeId::BIGINT;
+	case tid_FLOAT_INT:
+	case tid_DECIMAL_INT:
+		return LogicalTypeId::DOUBLE;
+	case tid_TIMESTAMP_INT:
+		return LogicalTypeId::TIMESTAMP_TZ;
+	case tid_STRING_INT:
+	case tid_SYMBOL_INT:
+	case tid_CLOB_INT:
+		return LogicalTypeId::VARCHAR;
+	case tid_BLOB_INT:
+		return LogicalTypeId::BLOB;
+	case tid_LIST_INT:
+		return LogicalTypeId::LIST;
+	case tid_STRUCT_INT:
+		return LogicalTypeId::STRUCT;
+	default:
+		return LogicalTypeId::VARCHAR;
+	}
+}
+
+static void ExtractIonStructure(ION_READER *reader, ION_TYPE type, IonStructureNode &node,
+                                const IonStructureOptions &options, idx_t depth) {
+	node.count++;
+	BOOL is_null = FALSE;
+	if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
+		throw IOException("read_ion failed while checking null during schema inference");
+	}
+	if (is_null || type == tid_NULL || type == tid_EOF) {
+		node.null_count++;
+		return;
+	}
+
+	auto logical_type = IonTypeToLogicalTypeId(type);
+	if (node.type == LogicalTypeId::INVALID) {
+		node.type = logical_type;
+	} else if (node.type != logical_type) {
+		node.inconsistent = true;
+	}
+
+	if (depth >= options.max_depth) {
+		SkipIonValue(reader, type);
+		return;
+	}
+
+	switch (logical_type) {
+	case LogicalTypeId::LIST: {
+		if (ion_reader_step_in(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step into list during schema inference");
+		}
+		auto &child = node.GetListChild();
+		while (true) {
+			ION_TYPE elem_type = tid_NULL;
+			auto elem_status = ion_reader_next(reader, &elem_type);
+			if (elem_status == IERR_EOF || elem_type == tid_EOF) {
+				break;
+			}
+			if (elem_status != IERR_OK) {
+				throw IOException("read_ion failed while reading list element during schema inference");
+			}
+			ExtractIonStructure(reader, elem_type, child, options, depth + 1);
+		}
+		if (ion_reader_step_out(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step out of list during schema inference");
+		}
+		break;
+	}
+	case LogicalTypeId::STRUCT: {
+		if (ion_reader_step_in(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step into struct during schema inference");
+		}
+		while (true) {
+			ION_TYPE field_type = tid_NULL;
+			auto field_status = ion_reader_next(reader, &field_type);
+			if (field_status == IERR_EOF || field_type == tid_EOF) {
+				break;
+			}
+			if (field_status != IERR_OK) {
+				throw IOException("read_ion failed while reading struct field during schema inference");
+			}
+			ION_STRING field_name;
+			field_name.value = nullptr;
+			field_name.length = 0;
+			if (ion_reader_get_field_name(reader, &field_name) != IERR_OK) {
+				throw IOException("read_ion failed to read field name during schema inference");
+			}
+			auto name = string(reinterpret_cast<const char *>(field_name.value), field_name.length);
+			auto &child = node.GetStructChild(name);
+			ExtractIonStructure(reader, field_type, child, options, depth + 1);
+		}
+		if (ion_reader_step_out(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step out of struct during schema inference");
+		}
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+static bool IsStructureInconsistent(const IonStructureNode &node, double field_appearance_threshold) {
+	if (node.count <= node.null_count) {
+		return false;
+	}
+	if (node.children.empty()) {
+		return false;
+	}
+	double total_child_counts = 0;
+	for (const auto &child : node.children) {
+		total_child_counts += static_cast<double>(child.count) / static_cast<double>(node.count - node.null_count);
+	}
+	const auto avg_occurrence = total_child_counts / static_cast<double>(node.children.size());
+	return avg_occurrence < field_appearance_threshold;
+}
+
+static double CalculateTypeSimilarity(const LogicalType &merged, const LogicalType &type, idx_t max_depth, idx_t depth);
+
+static double CalculateMapAndStructSimilarity(const LogicalType &map_type, const LogicalType &struct_type,
+                                              const bool swapped, const idx_t max_depth, const idx_t depth) {
+	const auto &map_value_type = MapType::ValueType(map_type);
+	const auto &struct_child_types = StructType::GetChildTypes(struct_type);
+	double total_similarity = 0;
+	for (const auto &struct_child_type : struct_child_types) {
+		const auto similarity =
+		    swapped ? CalculateTypeSimilarity(struct_child_type.second, map_value_type, max_depth, depth + 1)
+		            : CalculateTypeSimilarity(map_value_type, struct_child_type.second, max_depth, depth + 1);
+		if (similarity < 0) {
+			return similarity;
+		}
+		total_similarity += similarity;
+	}
+	return total_similarity / static_cast<double>(struct_child_types.size());
+}
+
+static double CalculateTypeSimilarity(const LogicalType &merged, const LogicalType &type, const idx_t max_depth,
+                                      const idx_t depth) {
+	if (depth >= max_depth || merged.id() == LogicalTypeId::SQLNULL || type.id() == LogicalTypeId::SQLNULL) {
+		return 1;
+	}
+	if (merged == type) {
+		return 1;
+	}
+
+	switch (merged.id()) {
+	case LogicalTypeId::STRUCT: {
+		if (type.id() == LogicalTypeId::MAP) {
+			return CalculateMapAndStructSimilarity(type, merged, true, max_depth, depth);
+		} else if (type.id() != LogicalTypeId::STRUCT) {
+			return -1;
+		}
+		const auto &merged_child_types = StructType::GetChildTypes(merged);
+		const auto &type_child_types = StructType::GetChildTypes(type);
+
+		unordered_map<string, const LogicalType &> merged_child_types_map;
+		for (const auto &merged_child : merged_child_types) {
+			merged_child_types_map.emplace(merged_child.first, merged_child.second);
+		}
+
+		double total_similarity = 0;
+		for (const auto &type_child_type : type_child_types) {
+			const auto it = merged_child_types_map.find(type_child_type.first);
+			if (it == merged_child_types_map.end()) {
+				return -1;
+			}
+			const auto similarity = CalculateTypeSimilarity(it->second, type_child_type.second, max_depth, depth + 1);
+			if (similarity < 0) {
+				return similarity;
+			}
+			total_similarity += similarity;
+		}
+		return total_similarity / static_cast<double>(merged_child_types.size());
+	}
+	case LogicalTypeId::MAP: {
+		if (type.id() == LogicalTypeId::MAP) {
+			return CalculateTypeSimilarity(MapType::ValueType(merged), MapType::ValueType(type), max_depth, depth + 1);
+		}
+		if (type.id() != LogicalTypeId::STRUCT) {
+			return -1;
+		}
+		return CalculateMapAndStructSimilarity(merged, type, false, max_depth, depth);
+	}
+	case LogicalTypeId::LIST: {
+		if (type.id() != LogicalTypeId::LIST) {
+			return -1;
+		}
+		const auto &merged_child_type = ListType::GetChildType(merged);
+		const auto &type_child_type = ListType::GetChildType(type);
+		return CalculateTypeSimilarity(merged_child_type, type_child_type, max_depth, depth + 1);
+	}
+	default:
+		return 1;
+	}
+}
+
+static LogicalType IonStructureToType(const IonStructureNode &node, const IonStructureOptions &options, idx_t depth,
+                                      const LogicalType &null_type);
+
+static LogicalType MergeChildrenTypes(const IonStructureNode &node, const IonStructureOptions &options, idx_t depth,
+                                      const LogicalType &null_type) {
+	LogicalType merged_type = LogicalTypeId::SQLNULL;
+	for (const auto &child : node.children) {
+		auto child_type = IonStructureToType(child, options, depth, null_type);
+		merged_type = PromoteIonType(merged_type, child_type);
+	}
+	return merged_type;
+}
+
+static LogicalType StructureToTypeObject(const IonStructureNode &node, const IonStructureOptions &options, idx_t depth,
+                                         const LogicalType &null_type) {
+	if (node.children.empty()) {
+		if (options.map_inference_threshold != DConstants::INVALID_INDEX) {
+			return LogicalType::MAP(LogicalType::VARCHAR, null_type);
+		}
+		return LogicalType::VARCHAR;
+	}
+
+	if (options.map_inference_threshold != DConstants::INVALID_INDEX &&
+	    IsStructureInconsistent(node, options.field_appearance_threshold)) {
+		auto map_value_type = MergeChildrenTypes(node, options, depth + 1, null_type);
+		return LogicalType::MAP(LogicalType::VARCHAR, map_value_type);
+	}
+
+	child_list_t<LogicalType> child_types;
+	child_types.reserve(node.children.size());
+	for (idx_t i = 0; i < node.children.size(); i++) {
+		child_types.emplace_back(node.child_names[i],
+		                         IonStructureToType(node.children[i], options, depth + 1, null_type));
+	}
+
+	if (options.map_inference_threshold != DConstants::INVALID_INDEX &&
+	    node.children.size() >= options.map_inference_threshold) {
+		auto map_value_type = MergeChildrenTypes(node, options, depth + 1, LogicalTypeId::SQLNULL);
+		double total_similarity = 0;
+		for (const auto &child_type : child_types) {
+			const auto similarity = CalculateTypeSimilarity(map_value_type, child_type.second, options.max_depth,
+			                                                depth + 1);
+			if (similarity < 0) {
+				total_similarity = similarity;
+				break;
+			}
+			total_similarity += similarity;
+		}
+		const auto avg_similarity = total_similarity / static_cast<double>(child_types.size());
+		if (avg_similarity >= 0.8) {
+			return LogicalType::MAP(LogicalType::VARCHAR, map_value_type);
+		}
+	}
+
+	return LogicalType::STRUCT(child_types);
+}
+
+static LogicalType IonStructureToType(const IonStructureNode &node, const IonStructureOptions &options, idx_t depth,
+                                      const LogicalType &null_type) {
+	if (depth >= options.max_depth) {
+		return LogicalType::VARCHAR;
+	}
+	if (node.type == LogicalTypeId::INVALID) {
+		return null_type;
+	}
+	if (node.inconsistent) {
+		return LogicalType::VARCHAR;
+	}
+	switch (node.type) {
+	case LogicalTypeId::LIST: {
+		if (node.children.empty()) {
+			return LogicalType::LIST(null_type);
+		}
+		auto child_type = IonStructureToType(node.children[0], options, depth + 1, null_type);
+		return LogicalType::LIST(NormalizeInferredIonType(child_type));
+	}
+	case LogicalTypeId::STRUCT:
+		return StructureToTypeObject(node, options, depth, null_type);
+	default:
+		return NormalizeInferredIonType(LogicalType(node.type));
+	}
+}
+
+static LogicalType InferIonValueType(ION_READER *reader, ION_TYPE type) {
+	BOOL is_null = FALSE;
+	if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
+		throw IOException("read_ion failed while checking null during schema inference");
+	}
+	if (is_null || type == tid_NULL || type == tid_EOF) {
+		return LogicalType::SQLNULL;
+	}
+	switch (ION_TYPE_INT(type)) {
+	case tid_BOOL_INT:
+		return LogicalType::BOOLEAN;
+	case tid_INT_INT:
+		return LogicalType::BIGINT;
+	case tid_FLOAT_INT:
+		return LogicalType::DOUBLE;
+	case tid_DECIMAL_INT:
+		return LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, 18);
+	case tid_TIMESTAMP_INT:
+		return LogicalType::TIMESTAMP_TZ;
+	case tid_STRING_INT:
+	case tid_SYMBOL_INT:
+	case tid_CLOB_INT:
+		return LogicalType::VARCHAR;
+	case tid_BLOB_INT:
+		return LogicalType::BLOB;
+	case tid_LIST_INT: {
+		if (ion_reader_step_in(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step into list during schema inference");
+		}
+		LogicalType child_type = LogicalType::SQLNULL;
+		while (true) {
+			ION_TYPE elem_type = tid_NULL;
+			auto elem_status = ion_reader_next(reader, &elem_type);
+			if (elem_status == IERR_EOF || elem_type == tid_EOF) {
+				break;
+			}
+			if (elem_status != IERR_OK) {
+				throw IOException("read_ion failed while reading list element during schema inference");
+			}
+			auto inferred = InferIonValueType(reader, elem_type);
+			child_type = PromoteIonType(child_type, NormalizeInferredIonType(inferred));
+		}
+		if (ion_reader_step_out(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step out of list during schema inference");
+		}
+		return LogicalType::LIST(child_type);
+	}
+	case tid_STRUCT_INT: {
+		if (ion_reader_step_in(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step into struct during schema inference");
+		}
+		child_list_t<LogicalType> children;
+		unordered_map<string, idx_t> index_by_name;
+		while (true) {
+			ION_TYPE field_type = tid_NULL;
+			auto field_status = ion_reader_next(reader, &field_type);
+			if (field_status == IERR_EOF || field_type == tid_EOF) {
+				break;
+			}
+			if (field_status != IERR_OK) {
+				throw IOException("read_ion failed while reading struct field during schema inference");
+			}
+			ION_STRING field_name;
+			field_name.value = nullptr;
+			field_name.length = 0;
+			if (ion_reader_get_field_name(reader, &field_name) != IERR_OK) {
+				throw IOException("read_ion failed to read field name during schema inference");
+			}
+			auto name = string(reinterpret_cast<const char *>(field_name.value), field_name.length);
+			auto inferred = InferIonValueType(reader, field_type);
+			auto it = index_by_name.find(name);
+			if (it == index_by_name.end()) {
+				index_by_name.emplace(name, children.size());
+				children.emplace_back(name, NormalizeInferredIonType(inferred));
+			} else {
+				children[it->second].second =
+				    PromoteIonType(children[it->second].second, NormalizeInferredIonType(inferred));
+			}
+		}
+		if (ion_reader_step_out(reader) != IERR_OK) {
+			throw IOException("read_ion failed to step out of struct during schema inference");
+		}
+		return LogicalType::STRUCT(std::move(children));
+	}
+	default:
+		return LogicalType::VARCHAR;
+	}
+}
 
 static void EnsureIonExtractor(IonReadScanState &scan_state, const IonReadBindData &bind_data,
                                const vector<idx_t> &projected_cols, bool profile) {
@@ -325,17 +770,29 @@ static void EnsureIonExtractor(IonReadScanState &scan_state, const IonReadBindDa
 #endif
 }
 
+static void OpenIonFile(IonReadScanState &scan_state, const string &path, ClientContext &context) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	if (scan_state.stream_state.handle) {
+		scan_state.stream_state.handle->Close();
+	}
+	scan_state.stream_state.handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	scan_state.stream_state.query_context = QueryContext(context);
+	scan_state.stream_state.offset = 0;
+	scan_state.stream_state.end_offset = 0;
+	scan_state.stream_state.bounded = false;
+	scan_state.ResetReader();
+}
+
 static unique_ptr<GlobalTableFunctionState> IonReadInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<IonReadBindData>();
 	auto result = make_uniq<IonReadGlobalState>();
 #ifndef DUCKDB_IONC
 	throw InvalidInputException("read_ion requires ion-c; rebuild with ion-c available");
 #else
-	auto &fs = FileSystem::GetFileSystem(context);
-	result->scan_state.stream_state.handle = fs.OpenFile(bind_data.path, FileFlags::FILE_FLAGS_READ);
-	result->scan_state.stream_state.query_context = QueryContext(context);
 	result->scan_state.reader_options = {};
 	result->scan_state.reader_options.skip_character_validation = TRUE;
+	result->scan_state.file_index = 0;
+	OpenIonFile(result->scan_state, bind_data.paths[0], context);
 	result->file_size = result->scan_state.stream_state.handle->GetFileSize();
 	result->column_ids = input.column_ids;
 	const bool all_columns = result->column_ids.empty();
@@ -357,7 +814,8 @@ static unique_ptr<GlobalTableFunctionState> IonReadInit(ClientContext &context, 
 			result->projected_columns++;
 		}
 	}
-	result->parallel_enabled = bind_data.format == IonReadBindData::Format::NEWLINE_DELIMITED && bind_data.records &&
+	result->parallel_enabled = bind_data.paths.size() == 1 &&
+	                           bind_data.format == IonReadBindData::Format::NEWLINE_DELIMITED && bind_data.records &&
 	                           result->scan_state.stream_state.handle->CanSeek();
 	if (result->parallel_enabled) {
 		auto &scheduler = TaskScheduler::GetScheduler(context);
@@ -500,15 +958,16 @@ static unique_ptr<LocalTableFunctionState> IonReadInitLocal(ExecutionContext &co
 #ifndef DUCKDB_IONC
 	throw InvalidInputException("read_ion requires ion-c; rebuild with ion-c available");
 #else
-	auto &fs = FileSystem::GetFileSystem(context.client);
-	result->scan_state.stream_state.handle = fs.OpenFile(bind_data.path, FileFlags::FILE_FLAGS_READ);
-	result->scan_state.stream_state.query_context = QueryContext(context.client);
 	result->scan_state.reader_options = global_state.scan_state.reader_options;
-	if (!InitializeIonRange(global_state, *result)) {
-		result->scan_state.finished = true;
-	} else {
-		lock_guard<mutex> guard(global_state.lock);
-		global_state.inflight_ranges++;
+	result->scan_state.file_index = 0;
+	OpenIonFile(result->scan_state, bind_data.paths[0], context.client);
+	if (global_state.parallel_enabled) {
+		if (!InitializeIonRange(global_state, *result)) {
+			result->scan_state.finished = true;
+		} else {
+			lock_guard<mutex> guard(global_state.lock);
+			global_state.inflight_ranges++;
+		}
 	}
 #endif
 	return std::move(result);
@@ -1272,6 +1731,66 @@ static void ParseRecordsParameter(const Value &value, IonReadBindData::RecordsMo
 	}
 }
 
+static void ParseMaxDepthParameter(const Value &value, idx_t &max_depth) {
+	auto arg = BigIntValue::Get(value);
+	if (arg == -1) {
+		max_depth = NumericLimits<idx_t>::Maximum();
+	} else if (arg > 0) {
+		max_depth = arg;
+	} else {
+		throw BinderException("read_ion \"maximum_depth\" parameter must be positive, or -1 for unlimited.");
+	}
+}
+
+static void ParseFieldAppearanceThresholdParameter(const Value &value, double &field_appearance_threshold) {
+	auto arg = DoubleValue::Get(value);
+	if (arg < 0 || arg > 1) {
+		throw BinderException("read_ion \"field_appearance_threshold\" parameter must be between 0 and 1.");
+	}
+	field_appearance_threshold = arg;
+}
+
+static void ParseMapInferenceThresholdParameter(const Value &value, idx_t &map_inference_threshold) {
+	auto arg = BigIntValue::Get(value);
+	if (arg == -1) {
+		map_inference_threshold = DConstants::INVALID_INDEX;
+	} else if (arg >= 0) {
+		map_inference_threshold = arg;
+	} else {
+		throw BinderException("read_ion \"map_inference_threshold\" parameter must be 0 or positive, "
+		                      "or -1 to disable map inference.");
+	}
+}
+
+static void ParseSampleSizeParameter(const Value &value, idx_t &sample_size) {
+	auto arg = BigIntValue::Get(value);
+	if (arg == -1) {
+		sample_size = NumericLimits<idx_t>::Maximum();
+	} else if (arg > 0) {
+		sample_size = arg;
+	} else {
+		throw BinderException("read_ion \"sample_size\" parameter must be positive, or -1 to sample all input.");
+	}
+}
+
+static void ParseMaximumSampleFilesParameter(const Value &value, idx_t &maximum_sample_files) {
+	auto arg = BigIntValue::Get(value);
+	if (arg == -1) {
+		maximum_sample_files = NumericLimits<idx_t>::Maximum();
+	} else if (arg > 0) {
+		maximum_sample_files = arg;
+	} else {
+		throw BinderException("read_ion \"maximum_sample_files\" parameter must be positive, or -1 to remove the limit.");
+	}
+}
+
+static void ParseUnionByNameParameter(const Value &value, bool &union_by_name) {
+	if (value.type().id() != LogicalTypeId::BOOLEAN) {
+		throw BinderException("read_ion \"union_by_name\" parameter must be BOOLEAN.");
+	}
+	union_by_name = BooleanValue::Get(value);
+}
+
 static void ParseProfileParameter(const Value &value, bool &profile) {
 	if (value.type().id() != LogicalTypeId::BOOLEAN) {
 		throw BinderException("read_ion \"profile\" parameter must be BOOLEAN.");
@@ -1286,24 +1805,50 @@ static void ParseUseExtractorParameter(const Value &value, bool &use_extractor) 
 	use_extractor = BooleanValue::Get(value);
 }
 
-static void InferIonSchema(const string &path, vector<string> &names, vector<LogicalType> &types,
+static vector<string> ParseIonPaths(ClientContext &context, const Value &value) {
+	vector<string> raw_paths;
+	if (value.type().id() == LogicalTypeId::VARCHAR) {
+		raw_paths.push_back(StringValue::Get(value.CastAs(context, LogicalType::VARCHAR)));
+	} else if (value.type().id() == LogicalTypeId::LIST) {
+		auto &entries = ListValue::GetChildren(value);
+		raw_paths.reserve(entries.size());
+		for (auto &entry : entries) {
+			if (entry.IsNull()) {
+				throw InvalidInputException("read_ion does not allow NULL paths");
+			}
+			raw_paths.push_back(StringValue::Get(entry.CastAs(context, LogicalType::VARCHAR)));
+		}
+	} else {
+		throw InvalidInputException("read_ion expects a VARCHAR path or LIST of VARCHAR paths");
+	}
+
+	auto &fs = FileSystem::GetFileSystem(context);
+	vector<string> paths;
+	for (auto &path : raw_paths) {
+		auto matches = fs.GlobFiles(path, context, FileGlobOptions::DISALLOW_EMPTY);
+		for (auto &match : matches) {
+			paths.push_back(match.path);
+		}
+	}
+	return paths;
+}
+
+static void InferIonSchema(const vector<string> &paths, vector<string> &names, vector<LogicalType> &types,
                            IonReadBindData::Format format, IonReadBindData::RecordsMode records_mode,
-                           bool &records_out, ClientContext &context) {
+                           idx_t max_depth, double field_appearance_threshold, idx_t map_inference_threshold,
+                           idx_t sample_size, idx_t maximum_sample_files, bool &records_out, ClientContext &context) {
 	ION_READER *reader = nullptr;
 	IonStreamState stream_state;
 	auto &fs = FileSystem::GetFileSystem(context);
-	stream_state.handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	stream_state.query_context = QueryContext(context);
 	ION_READER_OPTIONS reader_options = {};
 	reader_options.skip_character_validation = TRUE;
-	auto status = ion_reader_open_stream(&reader, &stream_state, IonStreamHandler, &reader_options);
-	if (status != IERR_OK) {
-		throw IOException("read_ion failed to open Ion reader for schema inference");
-	}
 
+	IonStructureOptions options {max_depth, field_appearance_threshold, map_inference_threshold};
 	unordered_map<string, idx_t> index_by_name;
 	unordered_map<SID, idx_t> sid_map;
-	const idx_t max_rows = 1000;
+	vector<IonStructureNode> field_nodes;
+	IonStructureNode scalar_node;
+	const idx_t max_rows = sample_size;
 	idx_t rows = 0;
 	bool records_decided = (records_mode != IonReadBindData::RecordsMode::AUTO);
 	if (records_decided) {
@@ -1371,10 +1916,10 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 				}
 				auto it = index_by_name.find(name);
 				if (it == index_by_name.end()) {
-					field_idx = types.size();
+					field_idx = field_nodes.size();
 					index_by_name.emplace(name, field_idx);
 					names.push_back(name);
-					types.push_back(LogicalType::SQLNULL);
+					field_nodes.emplace_back();
 				} else {
 					field_idx = it->second;
 				}
@@ -1382,13 +1927,7 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 					sid_map.emplace(field_symbol->sid, field_idx);
 				}
 			}
-			auto value = IonReadValue(reader, field_type);
-			if (value.IsNull()) {
-				continue;
-			}
-			auto &current_type = types[field_idx];
-			auto incoming_type = NormalizeInferredIonType(value.type());
-			current_type = PromoteIonType(current_type, incoming_type);
+			ExtractIonStructure(reader, field_type, field_nodes[field_idx], options, 0);
 		}
 		if (ion_reader_step_out(reader) != IERR_OK) {
 			ion_reader_close(reader);
@@ -1397,93 +1936,107 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 	};
 
 	auto read_scalar = [&](ION_TYPE type) {
-		auto value = IonReadValue(reader, type);
-		if (!value.IsNull()) {
-			if (types.empty()) {
-				types.push_back(NormalizeInferredIonType(value.type()));
-			} else {
-				types[0] = PromoteIonType(types[0], NormalizeInferredIonType(value.type()));
-			}
-		}
+		ExtractIonStructure(reader, type, scalar_node, options, 0);
 		if (names.empty()) {
 			names.push_back("ion");
 		}
 	};
 
-	if (format == IonReadBindData::Format::ARRAY) {
-		ION_TYPE outer_type = tid_NULL;
-		if (!next_value(outer_type)) {
-			ion_reader_close(reader);
-			throw InvalidInputException("read_ion expects a top-level list when format='array'");
+	const idx_t file_limit = MinValue<idx_t>(paths.size(), maximum_sample_files);
+	for (idx_t path_idx = 0; path_idx < file_limit; path_idx++) {
+		auto &path = paths[path_idx];
+		stream_state.handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		stream_state.query_context = QueryContext(context);
+		auto status = ion_reader_open_stream(&reader, &stream_state, IonStreamHandler, &reader_options);
+		if (status != IERR_OK) {
+			throw IOException("read_ion failed to open Ion reader for schema inference");
 		}
-		if (outer_type != tid_LIST) {
-			ion_reader_close(reader);
-			throw InvalidInputException("read_ion expects a top-level list when format='array'");
-		}
-		if (ion_reader_step_in(reader) != IERR_OK) {
-			ion_reader_close(reader);
-			throw IOException("read_ion failed to step into list during schema inference");
-		}
-		while (rows < max_rows) {
-			ION_TYPE type = tid_NULL;
-			if (!next_value(type)) {
-				break;
-			}
-			BOOL is_null = FALSE;
-			if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
-				ion_reader_close(reader);
-				throw IOException("read_ion failed while checking null during schema inference");
-			}
-			if (is_null) {
-				rows++;
-				continue;
-			}
-			if (!records_decided) {
-				records_out = (type == tid_STRUCT);
-				records_decided = true;
-			}
-			if (records_out) {
-				read_record(type);
-			} else {
-				read_scalar(type);
-			}
-			rows++;
-		}
-		if (ion_reader_step_out(reader) != IERR_OK) {
-			ion_reader_close(reader);
-			throw IOException("read_ion failed to step out of list during schema inference");
-		}
-	} else {
-		while (rows < max_rows) {
-			ION_TYPE type = tid_NULL;
-			if (!next_value(type)) {
-				break;
-			}
-			BOOL is_null = FALSE;
-			if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
-				ion_reader_close(reader);
-				throw IOException("read_ion failed while checking null during schema inference");
-			}
-			if (is_null) {
-				rows++;
-				continue;
-			}
-			if (!records_decided) {
-				records_out = (type == tid_STRUCT);
-				records_decided = true;
-			}
-			if (records_out) {
-				read_record(type);
-			} else {
-				read_scalar(type);
-			}
-			rows++;
-		}
-	}
+		sid_map.clear();
 
-	ion_reader_close(reader);
-	if (stream_state.handle) {
-		stream_state.handle->Close();
+		if (format == IonReadBindData::Format::ARRAY) {
+			ION_TYPE outer_type = tid_NULL;
+			if (!next_value(outer_type)) {
+				ion_reader_close(reader);
+				stream_state.handle->Close();
+				continue;
+			}
+			if (outer_type != tid_LIST) {
+				ion_reader_close(reader);
+				stream_state.handle->Close();
+				throw InvalidInputException("read_ion expects a top-level list when format='array'");
+			}
+			if (ion_reader_step_in(reader) != IERR_OK) {
+				ion_reader_close(reader);
+				stream_state.handle->Close();
+				throw IOException("read_ion failed to step into list during schema inference");
+			}
+			while (rows < max_rows) {
+				ION_TYPE type = tid_NULL;
+				if (!next_value(type)) {
+					break;
+				}
+				BOOL is_null = FALSE;
+				if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
+					ion_reader_close(reader);
+					stream_state.handle->Close();
+					throw IOException("read_ion failed while checking null during schema inference");
+				}
+				if (is_null) {
+					rows++;
+					continue;
+				}
+				if (!records_decided) {
+					records_out = (type == tid_STRUCT);
+					records_decided = true;
+				}
+				if (records_out) {
+					read_record(type);
+				} else {
+					read_scalar(type);
+				}
+				rows++;
+			}
+			if (ion_reader_step_out(reader) != IERR_OK) {
+				ion_reader_close(reader);
+				stream_state.handle->Close();
+				throw IOException("read_ion failed to step out of list during schema inference");
+			}
+		} else {
+			while (rows < max_rows) {
+				ION_TYPE type = tid_NULL;
+				if (!next_value(type)) {
+					break;
+				}
+				BOOL is_null = FALSE;
+				if (ion_reader_is_null(reader, &is_null) != IERR_OK) {
+					ion_reader_close(reader);
+					stream_state.handle->Close();
+					throw IOException("read_ion failed while checking null during schema inference");
+				}
+				if (is_null) {
+					rows++;
+					continue;
+				}
+				if (!records_decided) {
+					records_out = (type == tid_STRUCT);
+					records_decided = true;
+				}
+				if (records_out) {
+					read_record(type);
+				} else {
+					read_scalar(type);
+				}
+				rows++;
+			}
+		}
+
+		ion_reader_close(reader);
+		if (stream_state.handle) {
+			stream_state.handle->Close();
+		}
+		if (rows >= max_rows) {
+			break;
+		}
 	}
 
 	if (names.empty()) {
@@ -1491,6 +2044,16 @@ static void InferIonSchema(const string &path, vector<string> &names, vector<Log
 	}
 	if (!records_decided) {
 		records_out = true;
+	}
+
+	types.clear();
+	if (records_out) {
+		types.reserve(names.size());
+		for (auto &node : field_nodes) {
+			types.emplace_back(IonStructureToType(node, options, 0, LogicalTypeId::SQLNULL));
+		}
+	} else {
+		types.emplace_back(IonStructureToType(scalar_node, options, 0, LogicalTypeId::SQLNULL));
 	}
 }
 
@@ -1500,7 +2063,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 	    data_p.local_state ? &data_p.local_state->Cast<IonReadLocalState>() : nullptr;
 	IonReadScanState *scan_state = local_state ? &local_state->scan_state : &global_state.scan_state;
 	if (scan_state->finished) {
-		if (local_state && InitializeIonRange(global_state, *local_state)) {
+		if (local_state && global_state.parallel_enabled && InitializeIonRange(global_state, *local_state)) {
 			scan_state = &local_state->scan_state;
 		} else {
 			auto &bind_data = data_p.bind_data->Cast<IonReadBindData>();
@@ -1517,6 +2080,24 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 #else
 	auto &bind_data = data_p.bind_data->Cast<IonReadBindData>();
 	const auto profile = bind_data.profile;
+	auto open_next_file = [&]() -> bool {
+		if (scan_state->file_index + 1 >= bind_data.paths.size()) {
+			return false;
+		}
+		scan_state->file_index++;
+		OpenIonFile(*scan_state, bind_data.paths[scan_state->file_index], context);
+		auto status =
+		    ion_reader_open_stream(&scan_state->reader, &scan_state->stream_state, IonStreamHandler,
+		                           &scan_state->reader_options);
+		if (status != IERR_OK) {
+			throw IOException("read_ion failed to open Ion reader");
+		}
+		scan_state->reader_initialized = true;
+		if (!local_state) {
+			global_state.file_size = scan_state->stream_state.handle->GetFileSize();
+		}
+		return true;
+	};
 	if (!scan_state->reader_initialized) {
 		auto status =
 		    ion_reader_open_stream(&scan_state->reader, &scan_state->stream_state, IonStreamHandler,
@@ -1568,42 +2149,60 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		ION_TYPE type = tid_NULL;
 		auto status = IERR_OK;
 		auto next_start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-		if (bind_data.format == IonReadBindData::Format::ARRAY) {
-			if (!scan_state->array_initialized) {
+		bool has_value = false;
+		while (!has_value) {
+			if (bind_data.format == IonReadBindData::Format::ARRAY) {
+				if (!scan_state->array_initialized) {
+					status = ion_reader_next(scan_state->reader, &type);
+					if (status == IERR_EOF || type == tid_EOF) {
+						if (open_next_file()) {
+							continue;
+						}
+						scan_state->finished = true;
+						break;
+					}
+					if (status != IERR_OK) {
+						throw IOException("read_ion failed while reading array");
+					}
+					if (type != tid_LIST) {
+						throw InvalidInputException("read_ion expects a top-level list when format='array'");
+					}
+					if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
+						throw IOException("read_ion failed to step into list");
+					}
+					scan_state->array_initialized = true;
+				}
 				status = ion_reader_next(scan_state->reader, &type);
 				if (status == IERR_EOF || type == tid_EOF) {
+					ion_reader_step_out(scan_state->reader);
+					scan_state->array_initialized = false;
+					if (open_next_file()) {
+						continue;
+					}
 					scan_state->finished = true;
 					break;
 				}
 				if (status != IERR_OK) {
-					throw IOException("read_ion failed while reading array");
+					throw IOException("read_ion failed while reading array element");
 				}
-				if (type != tid_LIST) {
-					throw InvalidInputException("read_ion expects a top-level list when format='array'");
+				has_value = true;
+			} else {
+				status = ion_reader_next(scan_state->reader, &type);
+				if (status == IERR_EOF || type == tid_EOF) {
+					if (open_next_file()) {
+						continue;
+					}
+					scan_state->finished = true;
+					break;
 				}
-				if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
-					throw IOException("read_ion failed to step into list");
+				if (status != IERR_OK) {
+					throw IOException("read_ion failed while reading next value");
 				}
-				scan_state->array_initialized = true;
+				has_value = true;
 			}
-			status = ion_reader_next(scan_state->reader, &type);
-			if (status == IERR_EOF || type == tid_EOF) {
-				ion_reader_step_out(scan_state->reader);
-				scan_state->finished = true;
-				break;
-			}
-			if (status != IERR_OK) {
-				throw IOException("read_ion failed while reading array element");
-			}
-		} else {
-			status = ion_reader_next(scan_state->reader, &type);
-			if (status == IERR_EOF || type == tid_EOF) {
-				scan_state->finished = true;
-				break;
-			}
-			if (status != IERR_OK) {
-				throw IOException("read_ion failed while reading next value");
-			}
+		}
+		if (!has_value) {
+			break;
 		}
 		if (profile) {
 			auto elapsed = std::chrono::steady_clock::now() - next_start;
@@ -1833,11 +2432,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	read_ion.named_parameters["columns"] = LogicalType::ANY;
 	read_ion.named_parameters["format"] = LogicalType::VARCHAR;
 	read_ion.named_parameters["records"] = LogicalType::ANY;
+	read_ion.named_parameters["maximum_depth"] = LogicalType::BIGINT;
+	read_ion.named_parameters["field_appearance_threshold"] = LogicalType::DOUBLE;
+	read_ion.named_parameters["map_inference_threshold"] = LogicalType::BIGINT;
+	read_ion.named_parameters["sample_size"] = LogicalType::BIGINT;
+	read_ion.named_parameters["maximum_sample_files"] = LogicalType::BIGINT;
+	read_ion.named_parameters["union_by_name"] = LogicalType::BOOLEAN;
 	read_ion.named_parameters["profile"] = LogicalType::BOOLEAN;
 	read_ion.projection_pushdown = true;
 	read_ion.filter_pushdown = false;
 	read_ion.filter_prune = false;
-	loader.RegisterFunction(read_ion);
+	auto read_ion_set = MultiFileReader::CreateFunctionSet(read_ion);
+	loader.RegisterFunction(read_ion_set);
 	RegisterIonCopyFunction(loader);
 }
 

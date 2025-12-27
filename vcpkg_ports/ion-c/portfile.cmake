@@ -6,8 +6,8 @@ endif()
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO amzn/ion-c
-    REF v1.4.0
-    SHA512 9c51679f1396a77504bf7f478fdac2a28c505525419750778eab83fd0926f1be5abdcbe5fca8c1ed94551934ebb75b6ef3ce34c530a9e7ec15f2c1ed60283524
+    REF v1.1.4
+    SHA512 2d7e0deff4ab83cc3a153ad8249f30025ca6cc44541c52cba56876ea355c830984aae78a88081f55c9e8c42d86e70e67d573ed2a652d2c965d286a0e8fe86ec4
     PATCHES
         disable-tests-tools.patch
 )
@@ -16,6 +16,7 @@ vcpkg_configure_cmake(
     SOURCE_PATH "${SOURCE_PATH}"
     OPTIONS
         -DBUILD_SHARED_LIBS=OFF
+        -DIONC_BUILD_TESTS=OFF
 )
 
 vcpkg_install_cmake()
