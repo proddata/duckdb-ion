@@ -13,6 +13,10 @@ jobs:
     name: Linux
     runs-on: ubuntu-latest
     env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPRESS: 'true'
+      CCACHE_MAXSIZE: 400M
+      CCACHE_BASEDIR: ${{ github.workspace }}
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: x64-linux
       GEN: ninja
@@ -22,17 +26,37 @@ jobs:
           fetch-depth: 0
           submodules: 'true'
 
-      - name: Install Ninja
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+      - name: Install Ninja and ccache
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build ccache
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.ref }}-
+            ${{ runner.os }}-ccache-
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg
+            vcpkg_installed
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg_ports/**') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11.1
         with:
           vcpkgGitCommitId: ce613c41372b23b1f51333815feb3edd87ef8a8b
+          vcpkgJsonGlob: 'vcpkg.json'
 
       - name: Build
         run: |
-          CCACHE_DISABLE=1 make
+          make
 
       - name: Test
         run: |
@@ -50,7 +74,6 @@ jobs:
           . .venv/bin/activate
           python -m pip install clang-tidy
           PATH="${{ github.workspace }}/.venv/bin:$PATH" \
-            CCACHE_DISABLE=1 \
             VCPKG_TOOLCHAIN_PATH="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             VCPKG_TARGET_TRIPLET="x64-linux" \
             make tidy-check
@@ -59,6 +82,10 @@ jobs:
     name: MacOS
     runs-on: macos-latest
     env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPRESS: 'true'
+      CCACHE_MAXSIZE: 400M
+      CCACHE_BASEDIR: ${{ github.workspace }}
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       GEN: ninja
     steps:
@@ -67,8 +94,27 @@ jobs:
           fetch-depth: 0
           submodules: 'true'
 
-      - name: Install Ninja
-        run: brew install ninja
+      - name: Install Ninja and ccache
+        run: brew install ninja ccache
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.ref }}-
+            ${{ runner.os }}-ccache-
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg
+            vcpkg_installed
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg_ports/**') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-
 
       - uses: actions/setup-python@v5
         with:
@@ -78,10 +124,11 @@ jobs:
         uses: lukka/run-vcpkg@v11.1
         with:
           vcpkgGitCommitId: ce613c41372b23b1f51333815feb3edd87ef8a8b
+          vcpkgJsonGlob: 'vcpkg.json'
 
       - name: Build
         run: |
-          VCPKG_TARGET_TRIPLET="$(uname -m)-osx" CCACHE_DISABLE=1 make
+          VCPKG_TARGET_TRIPLET="$(uname -m)-osx" make
 
       - name: Test
         run: |
@@ -99,7 +146,6 @@ jobs:
           . .venv/bin/activate
           python -m pip install clang-tidy
           PATH="${{ github.workspace }}/.venv/bin:$PATH" \
-            CCACHE_DISABLE=1 \
             VCPKG_TOOLCHAIN_PATH="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             VCPKG_TARGET_TRIPLET="$(uname -m)-osx" \
             make tidy-check
