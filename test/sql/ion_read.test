@@ -5,6 +5,9 @@
 require ion
 
 statement ok
+INSTALL json;
+
+statement ok
 LOAD json;
 
 query IIIIII
