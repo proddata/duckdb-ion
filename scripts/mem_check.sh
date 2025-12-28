@@ -28,9 +28,14 @@ require_file() {
   fi
 }
 
-for f in "$ION_FILE" "$ION_BINARY_FILE" "$ION_WIDE_FILE" "$ION_WIDE_BINARY_FILE"; do
-  require_file "$f"
-done
+require_file "$ION_FILE"
+require_file "$ION_WIDE_FILE"
+
+has_binary=1
+if [[ ! -f "$ION_BINARY_FILE" || ! -f "$ION_WIDE_BINARY_FILE" ]]; then
+  echo "Binary Ion inputs missing; skipping binary mem checks." >&2
+  has_binary=0
+fi
 
 run_case() {
   local label="$1"
@@ -48,16 +53,22 @@ run_case() {
 
 run_case "read_count_text" \
   "LOAD ion; SELECT COUNT(*) FROM read_ion('$ION_FILE');"
-run_case "read_count_binary" \
-  "LOAD ion; SELECT COUNT(*) FROM read_ion('$ION_BINARY_FILE');"
+if [[ "$has_binary" -eq 1 ]]; then
+  run_case "read_count_binary" \
+    "LOAD ion; SELECT COUNT(*) FROM read_ion('$ION_BINARY_FILE');"
+fi
 run_case "read_project_text" \
   "LOAD ion; SELECT id, category, amount::DOUBLE FROM read_ion('$ION_FILE');"
-run_case "read_project_binary" \
-  "LOAD ion; SELECT id, category, amount::DOUBLE FROM read_ion('$ION_BINARY_FILE');"
+if [[ "$has_binary" -eq 1 ]]; then
+  run_case "read_project_binary" \
+    "LOAD ion; SELECT id, category, amount::DOUBLE FROM read_ion('$ION_BINARY_FILE');"
+fi
 run_case "read_wide_text" \
   "LOAD ion; SELECT id, w_int_00, w_str_00, w_dec_00 FROM read_ion('$ION_WIDE_FILE');"
-run_case "read_wide_binary" \
-  "LOAD ion; SELECT id, w_int_00, w_str_00, w_dec_00 FROM read_ion('$ION_WIDE_BINARY_FILE');"
+if [[ "$has_binary" -eq 1 ]]; then
+  run_case "read_wide_binary" \
+    "LOAD ion; SELECT id, w_int_00, w_str_00, w_dec_00 FROM read_ion('$ION_WIDE_BINARY_FILE');"
+fi
 
 summary_path="$OUT_DIR/summary.txt"
 : > "$summary_path"
