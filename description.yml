@@ -1,6 +1,6 @@
 extension:
   name: ion
-  description: Read AWS Ion data and write Ion text with typed mappings
+  description: Read AWS Ion data and write Ion text or binary with typed mappings
   version: 0.1.0
   language: C++
   build: cmake
@@ -36,5 +36,6 @@ docs:
     -- Write a file in Ion text or binary format
     CREATE TABLE ion_demo AS SELECT 1::INTEGER AS id, 'hello' AS label;
     COPY ion_demo TO 'out.ion' (FORMAT ION);
+    COPY ion_demo TO 'out.ion' (FORMAT ION, BINARY TRUE);
   extended_description: |
-    The ion extension enables DuckDB to read AWS Ion in text and binary formats and write Ion text, preserving Ion types where possible for richer analytics.
+    The ion extension enables DuckDB to read AWS Ion in text and binary formats and write Ion text or binary, preserving Ion types where possible for richer analytics.
