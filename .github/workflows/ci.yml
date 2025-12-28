@@ -74,6 +74,12 @@ jobs:
         run: |
           make test
 
+      - name: Memory Check (small)
+        if: matrix.arch == 'x64'
+        run: |
+          ROWS=20000 scripts/perf_generate.sh
+          RUNS=1 scripts/mem_check.sh
+
       - name: Format Check
         if: matrix.arch == 'x64'
         run: |

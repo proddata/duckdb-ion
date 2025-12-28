@@ -62,6 +62,7 @@ PATH="$(pwd)/.venv/bin:$PATH" make format-check
 - Prefer SQLLogicTests in `test/sql/` for new functionality.
 - Name test files with the `.test` suffix and keep cases focused and minimal.
 - Run at least `make test` for PRs that change behavior.
+- Use `scripts/mem_check.sh` to sanity-check max RSS on larger Ion inputs when touching read/write paths.
 
 ## Commit & Pull Request Guidelines
 - Git history is minimal (single “Initial commit”); no strict convention yet.
