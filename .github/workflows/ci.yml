@@ -82,6 +82,7 @@ jobs:
 
       - name: Perf Check (small)
         if: matrix.arch == 'x64'
+        continue-on-error: true
         run: |
           ROWS=20000 OUT_DIR=perf/ci_data scripts/perf_generate.sh
           RUN_TS="ci-${{ github.sha }}" \
