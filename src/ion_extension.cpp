@@ -994,6 +994,10 @@ static inline bool IonStringEquals(const ION_STRING &ion_str, const string &valu
 	return std::memcmp(ion_str.value, value.data(), ion_str.length) == 0;
 }
 
+static inline void InitIonDecimal(ION_DECIMAL &decimal) {
+	std::memset(&decimal, 0, sizeof(decimal));
+}
+
 static inline void SkipIonValue(ION_READER *reader, ION_TYPE type) {
 	(void)reader;
 	(void)type;
@@ -1223,7 +1227,7 @@ static void AppendIonValueAsJson(ION_READER *reader, ION_TYPE type, string &out)
 	}
 	case tid_DECIMAL_INT: {
 		ION_DECIMAL decimal;
-		ion_decimal_zero(&decimal);
+		InitIonDecimal(decimal);
 		if (ion_reader_read_ion_decimal(reader, &decimal) != IERR_OK) {
 			throw IOException("read_ion failed to read decimal");
 		}
@@ -1529,7 +1533,7 @@ static Value IonReadValue(ION_READER *reader, ION_TYPE type) {
 	}
 	case tid_DECIMAL_INT: {
 		ION_DECIMAL decimal;
-		ion_decimal_zero(&decimal);
+		InitIonDecimal(decimal);
 		if (ion_reader_read_ion_decimal(reader, &decimal) != IERR_OK) {
 			throw IOException("read_ion failed to read decimal");
 		}
@@ -1819,7 +1823,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 			}
 		} else if (ION_TYPE_INT(field_type) == tid_DECIMAL_INT) {
 			ION_DECIMAL decimal;
-			ion_decimal_zero(&decimal);
+			InitIonDecimal(decimal);
 			if (ion_reader_read_ion_decimal(reader, &decimal) != IERR_OK) {
 				throw IOException("read_ion failed to read decimal");
 			}
@@ -1864,7 +1868,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 			return false;
 		}
 		ION_DECIMAL decimal;
-		ion_decimal_zero(&decimal);
+		InitIonDecimal(decimal);
 		if (ion_reader_read_ion_decimal(reader, &decimal) != IERR_OK) {
 			throw IOException("read_ion failed to read decimal");
 		}
