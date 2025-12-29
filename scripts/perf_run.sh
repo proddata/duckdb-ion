@@ -30,6 +30,16 @@ if [[ ! -f "$ION_WIDE_BINARY_FILE" ]]; then
   HAS_ION_WIDE_BINARY=0
 fi
 
+ENABLE_BINARY_WRITE="${ENABLE_BINARY_WRITE:-0}"
+ION_WRITE_BINARY_SQL=""
+ION_WRITE_BINARY_WIDE_SQL=""
+if [[ "$ENABLE_BINARY_WRITE" == "1" ]]; then
+  ION_WRITE_BINARY_SQL="PRAGMA profiling_output='$OUT_DIR/ion_write_binary.json';
+COPY perf_source TO '$OUT_DIR/write_binary.ion' (FORMAT ION, BINARY TRUE, OVERWRITE TRUE);"
+  ION_WRITE_BINARY_WIDE_SQL="PRAGMA profiling_output='$OUT_DIR/ion_write_binary_wide.json';
+COPY perf_wide TO '$OUT_DIR/write_binary_wide.ion' (FORMAT ION, BINARY TRUE, OVERWRITE TRUE);"
+fi
+
 ION_PROFILE_ARG=""
 if [[ "$ION_PROFILE" == "1" ]]; then
   ION_PROFILE_ARG=", profile := true"
@@ -199,8 +209,7 @@ FROM read_json('$JSON_WIDE_FILE');
 PRAGMA profiling_output='$OUT_DIR/ion_write_text.json';
 COPY perf_source TO '$OUT_DIR/write_text.ion' (FORMAT ION, OVERWRITE TRUE);
 
-PRAGMA profiling_output='$OUT_DIR/ion_write_binary.json';
-COPY perf_source TO '$OUT_DIR/write_binary.ion' (FORMAT ION, BINARY TRUE, OVERWRITE TRUE);
+${ION_WRITE_BINARY_SQL}
 
 PRAGMA profiling_output='$OUT_DIR/json_write_text.json';
 COPY perf_source TO '$OUT_DIR/write_text.jsonl' (FORMAT JSON, OVERWRITE TRUE);
@@ -208,8 +217,7 @@ COPY perf_source TO '$OUT_DIR/write_text.jsonl' (FORMAT JSON, OVERWRITE TRUE);
 PRAGMA profiling_output='$OUT_DIR/ion_write_text_wide.json';
 COPY perf_wide TO '$OUT_DIR/write_text_wide.ion' (FORMAT ION, OVERWRITE TRUE);
 
-PRAGMA profiling_output='$OUT_DIR/ion_write_binary_wide.json';
-COPY perf_wide TO '$OUT_DIR/write_binary_wide.ion' (FORMAT ION, BINARY TRUE, OVERWRITE TRUE);
+${ION_WRITE_BINARY_WIDE_SQL}
 
 PRAGMA profiling_output='$OUT_DIR/json_write_text_wide.json';
 COPY perf_wide TO '$OUT_DIR/write_text_wide.jsonl' (FORMAT JSON, OVERWRITE TRUE);

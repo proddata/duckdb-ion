@@ -13,7 +13,7 @@ This repository implements a DuckDB extension for reading and writing AWS Ion da
 - `read_ion(path, format := 'array')` reads from a top-level Ion list (array) instead of top-level values.
 - Nested Ion structs and lists are supported and map to DuckDB `STRUCT` and `LIST` types.
 - Binary Ion is supported when input starts with the Ion version marker.
-- `COPY ... (FORMAT ION)` writes Ion text; `COPY ... (FORMAT ION, BINARY TRUE)` writes Ion binary.
+- `COPY ... (FORMAT ION)` writes Ion text; binary output is temporarily disabled.
 
 ## Parameters
 `read_ion` accepts a single file path, a glob (e.g., `test/ion/*.ion`), or a list of paths.
@@ -80,38 +80,31 @@ FROM read_ion('test/ion/conflicts.ion', conflict_mode := 'json');
 ```
 
 ## Writing Ion
-`COPY ... TO` with `FORMAT ION` writes Ion text (newline‑delimited structs). Add `BINARY TRUE` to write Ion binary.
+`COPY ... TO` with `FORMAT ION` writes Ion text (newline‑delimited structs). Binary output is temporarily disabled.
 ```sql
 COPY (SELECT 1 AS a, 'x' AS b) TO 'out.ion' (FORMAT ION);
 ```
-Binary output:
-```sql
-COPY (SELECT 1 AS a, 'x' AS b) TO 'out.ion' (FORMAT ION, BINARY TRUE);
-```
-Notes:
-- Binary output currently normalizes timestamps to UTC (`Z`) and ignores source timezone offsets.
-  This is intended for interoperability but should be considered when round-tripping TIMESTAMPTZ values.
 To wrap output in a single Ion list:
 ```sql
 COPY (SELECT 1 AS a UNION ALL SELECT 2 AS a) TO 'out.ion' (FORMAT ION, ARRAY TRUE);
 ```
 
 ### DuckDB Type Mapping (Write)
-`to_ion` and text output follow the mappings below; binary output writes the native Ion type when available.
+`to_ion` and text output follow the mappings below.
 
-| DuckDB type | Ion type (text) | Ion type (binary) | Notes |
-| --- | --- | --- | --- |
-| BOOLEAN | bool | bool |  |
-| INT/UINT (all widths) | int | int |  |
-| FLOAT/DOUBLE | float | float |  |
-| DECIMAL | decimal | decimal |  |
-| DATE | string | timestamp | Text uses `YYYY-MM-DD`; binary uses day precision. |
-| TIMESTAMP/TIMESTAMPTZ | timestamp | timestamp | Text uses `T` separator and `Z` when no timezone is present. |
-| VARCHAR/CHAR | string | string |  |
-| BLOB | blob | blob | Text uses base64 inside `{{...}}`. |
-| LIST | list | list |  |
-| STRUCT | struct | struct | Field names are written as Ion symbols. |
-| other | string | string | Falls back to `value.ToString()`. |
+| DuckDB type | Ion type (text) | Notes |
+| --- | --- | --- |
+| BOOLEAN | bool |  |
+| INT/UINT (all widths) | int |  |
+| FLOAT/DOUBLE | float |  |
+| DECIMAL | decimal |  |
+| DATE | string | Text uses `YYYY-MM-DD`. |
+| TIMESTAMP/TIMESTAMPTZ | timestamp | Text uses `T` separator and `Z` when no timezone is present. |
+| VARCHAR/CHAR | string |  |
+| BLOB | blob | Text uses base64 inside `{{...}}`. |
+| LIST | list |  |
+| STRUCT | struct | Field names are written as Ion symbols. |
+| other | string | Falls back to `value.ToString()`. |
 
 ### to_ion
 Use `to_ion` to serialize a value (including structs/lists) into Ion text:

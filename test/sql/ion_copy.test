@@ -49,30 +49,12 @@ FROM read_ion('__TEST_DIR__/ion_write_nested.ion');
 alpha	2
 beta	NULL
 
-statement ok
+statement error
 COPY (SELECT 1 AS a,
              'x' AS b,
              12.340::DECIMAL(18,3) AS dec,
              TIMESTAMP '2020-01-02 03:04:05.678' AS ts,
              from_hex('010203') AS blob)
 TO '__TEST_DIR__/ion_write_binary.ion' (FORMAT ION, BINARY TRUE);
-
-query IIIII
-SELECT a,
-       b,
-       dec::DOUBLE,
-       strftime(ts::TIMESTAMP, '%Y-%m-%dT%H:%M:%S.%fZ') AS ts,
-       hex(blob) AS blob
-FROM read_ion('__TEST_DIR__/ion_write_binary.ion');
 ----
-1	x	12.34	2020-01-02T03:04:05.678000Z	010203
-
-statement ok
-COPY (SELECT 1 AS a UNION ALL SELECT 2) TO '__TEST_DIR__/ion_write_array_binary.ion'
-     (FORMAT ION, BINARY TRUE, ARRAY TRUE);
-
-query I
-SELECT a FROM read_ion('__TEST_DIR__/ion_write_array_binary.ion', format := 'array');
-----
-1
-2
+Binder Error: COPY (FORMAT ION) binary output is temporarily disabled.
