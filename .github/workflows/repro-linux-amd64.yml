@@ -15,6 +15,12 @@ jobs:
         run: |
           git clean -fdx
 
+      - name: Show test files
+        run: |
+          git status --short
+          ls -1 test/sql/ion_copy*.test || true
+          ls -1 test/sql/ion_read_binary*.test || true
+
       - name: Prepare cache dir
         run: |
           mkdir -p ccache_dir
@@ -102,7 +108,7 @@ jobs:
           docker run --env-file=docker_env.txt \
             -v "$GITHUB_WORKSPACE":/duckdb_build_dir \
             -v "$GITHUB_WORKSPACE/ccache_dir":/ccache_dir \
-            duckdb/linux_amd64 bash -lc "ulimit -c unlimited && make test_release"
+            duckdb/linux_amd64 bash -lc "ulimit -c unlimited && (echo core > /proc/sys/kernel/core_pattern 2>/dev/null || true) && make test_release"
 
       - name: List binary read tests
         if: failure()
@@ -123,4 +129,4 @@ jobs:
           docker run --env-file=docker_env.txt \
             -v "$GITHUB_WORKSPACE":/duckdb_build_dir \
             -v "$GITHUB_WORKSPACE/ccache_dir":/ccache_dir \
-            duckdb/linux_amd64 bash -lc "yum install -y gdb && bash scripts/run_unittest_debug.sh test/sql/ion_copy_binary.test test/sql/ion_read_binary*.test"
+            duckdb/linux_amd64 bash -lc "yum install -y gdb && MAX_ATTEMPTS=20 GDB_ATTEMPTS=10 bash scripts/run_unittest_debug.sh test/sql/ion_copy_binary.test test/sql/ion_read_binary*.test"
