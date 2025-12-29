@@ -1,0 +1,77 @@
+# name: test/sql/ion_read_binary_parity.test
+# description: read_ion binary parity for structs/arrays
+# group: [sql]
+
+require ion
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_text.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_binary.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/structs_binary.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/structs_text.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/array_text.ion', format := 'array')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/array_binary.ion', format := 'array')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/array_binary.ion', format := 'array')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/array_text.ion', format := 'array')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/sample.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/sample_binary.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/sample_binary.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/sample.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/nested.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/nested_binary.ion')
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM read_ion('test/ion/nested_binary.ion')
+    EXCEPT ALL
+    SELECT * FROM read_ion('test/ion/nested.ion')
+);
+----
+0

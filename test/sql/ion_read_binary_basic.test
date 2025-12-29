@@ -1,0 +1,24 @@
+# name: test/sql/ion_read_binary_basic.test
+# description: read_ion binary basic reads
+# group: [sql]
+
+require ion
+
+query I
+SELECT ion FROM read_ion('test/ion/scalars_binary.ion', records := false);
+----
+1
+2
+3
+
+query I
+SELECT name FROM read_ion('test/ion/structs_binary.ion');
+----
+alpha
+beta
+
+query I
+SELECT name FROM read_ion('test/ion/array_binary.ion', format := 'array');
+----
+alpha
+beta
