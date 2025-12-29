@@ -15,6 +15,27 @@ jobs:
         run: |
           mkdir -p ccache_dir
 
+      - name: Restart docker to run on /mnt
+        run: |
+          sudo systemctl stop docker
+
+      - name: Configure Docker with custom data directory
+        run: |
+          sudo mkdir -p /mnt/docker-data
+          echo '{ "data-root": "/mnt/docker-data" }' | sudo tee /etc/docker/daemon.json
+
+      - name: Start Docker with updated storage path
+        run: sudo systemctl start docker
+
+      - name: Verify Docker storage path
+        run: docker info | grep "Docker Root Dir"
+
+      - name: Show submodule refs
+        run: |
+          git submodule status
+          echo "duckdb: $(cd duckdb && git rev-parse HEAD)"
+          echo "extension-ci-tools: $(cd extension-ci-tools && git rev-parse HEAD)"
+
       - name: Build docker image
         run: |
           docker build \

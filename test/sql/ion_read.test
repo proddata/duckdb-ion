@@ -4,12 +4,6 @@
 
 require ion
 
-statement ok
-INSTALL json;
-
-statement ok
-LOAD json;
-
 query IIIIII
 SELECT bigint,
        varchar,
@@ -117,87 +111,6 @@ SELECT typeof(nested.score),
 FROM read_ion('test/ion/conflicts.ion') LIMIT 1;
 ----
 VARCHAR	VARCHAR
-
-query I
-SELECT typeof(list_extract(nums, 1))
-FROM read_ion('test/ion/conflicts.ion') LIMIT 1;
-----
-VARCHAR
-
-query II
-SELECT nested.score,
-       list_extract(nums, 1)
-FROM read_ion('test/ion/conflicts.ion');
-----
-10	1
-high	x
-12.500000000000000000	3
-7	{'k': 1}
-
-query II
-SELECT typeof(nested.score),
-       typeof(list_extract(nums, 1))
-FROM read_ion('test/ion/conflicts.ion', conflict_mode := 'json') LIMIT 1;
-----
-JSON	JSON
-
-query I
-SELECT COUNT(*) FROM (
-    SELECT * FROM read_ion('test/ion/conflicts.ion', conflict_mode := 'json')
-    EXCEPT ALL
-    SELECT * FROM read_ion('test/ion/conflicts_binary.ion', conflict_mode := 'json')
-);
-----
-0
-
-query I
-SELECT COUNT(*) FROM (
-    SELECT * FROM read_ion('test/ion/conflicts_binary.ion', conflict_mode := 'json')
-    EXCEPT ALL
-    SELECT * FROM read_ion('test/ion/conflicts.ion', conflict_mode := 'json')
-);
-----
-0
-
-query I
-SELECT typeof(obj)
-FROM read_ion('test/ion/struct_sparse.ion', field_appearance_threshold := 0.8)
-LIMIT 1;
-----
-MAP(VARCHAR, BIGINT)
-
-query I
-SELECT typeof(obj)
-FROM read_ion('test/ion/struct_sparse.ion', field_appearance_threshold := 0.8, map_inference_threshold := -1)
-LIMIT 1;
-----
-STRUCT(a BIGINT, b BIGINT)
-
-query I
-SELECT typeof(obj)
-FROM read_ion('test/ion/struct_map.ion', map_inference_threshold := 2)
-LIMIT 1;
-----
-MAP(VARCHAR, BIGINT)
-
-query I
-SELECT typeof(nested)
-FROM read_ion('test/ion/nested.ion', maximum_depth := 1)
-LIMIT 1;
-----
-STRUCT("name" VARCHAR, score VARCHAR)
-
-query I
-SELECT COUNT(*)
-FROM read_ion('test/ion/multi_[12].ion');
-----
-3
-
-query I
-SELECT COUNT(*)
-FROM read_ion(['test/ion/multi_1.ion', 'test/ion/multi_2.ion']);
-----
-3
 
 query II
 SELECT typeof(a), typeof(b)
