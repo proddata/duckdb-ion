@@ -99,3 +99,11 @@ jobs:
             -v "$GITHUB_WORKSPACE":/duckdb_build_dir \
             -v "$GITHUB_WORKSPACE/ccache_dir":/ccache_dir \
             duckdb/linux_amd64 make test_release
+
+      - name: Debug ion_copy_binary test (gdb)
+        if: failure()
+        run: |
+          docker run --env-file=docker_env.txt \
+            -v "$GITHUB_WORKSPACE":/duckdb_build_dir \
+            -v "$GITHUB_WORKSPACE/ccache_dir":/ccache_dir \
+            duckdb/linux_amd64 bash -lc "yum install -y gdb && scripts/run_unittest_debug.sh test/sql/ion_copy_binary.test"
