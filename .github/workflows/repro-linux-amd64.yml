@@ -15,26 +15,66 @@ jobs:
         run: |
           mkdir -p ccache_dir
 
-      - name: Pull docker image
+      - name: Build docker image
         run: |
-          docker pull duckdb/linux_amd64
+          docker build \
+            --build-arg 'vcpkg_url=https://github.com/microsoft/vcpkg.git' \
+            --build-arg 'vcpkg_commit=ce613c41372b23b1f51333815feb3edd87ef8a8b' \
+            -t duckdb/linux_amd64 \
+            ./extension-ci-tools/docker/linux_amd64
 
-      - name: Run test_release in docker
+      - name: Create env file for docker
         run: |
-          docker run --rm \
-            -e LINUX_CI_IN_DOCKER=1 \
-            -e VCPKG_BINARY_SOURCES="clear;http,https://vcpkg-cache.duckdb.org,read" \
-            -e VCPKG_TOOLCHAIN_PATH=/duckdb_build_dir/vcpkg/scripts/buildsystems/vcpkg.cmake \
-            -e VCPKG_TARGET_TRIPLET=x64-linux-release \
-            -e VCPKG_HOST_TRIPLET=x64-linux-release \
-            -e GEN=ninja \
-            -e BUILD_SHELL=1 \
-            -e DUCKDB_PLATFORM=linux_amd64 \
-            -e AWS_ACCESS_KEY_ID= \
-            -e AWS_SECRET_ACCESS_KEY= \
-            -e AWS_ENDPOINT_URL= \
-            -e AWS_DEFAULT_REGION= \
-            -e AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
+          cat <<-EOF > docker_env.txt
+          VCPKG_BINARY_SOURCES=clear;http,https://vcpkg-cache.duckdb.org,read
+          USE_MERGED_VCPKG_MANIFEST=
+          AWS_ACCESS_KEY_ID=
+          AWS_SECRET_ACCESS_KEY=
+          AWS_ENDPOINT_URL=
+          AWS_DEFAULT_REGION=
+          AWS_REQUEST_CHECKSUM_CALCULATION=when_required
+          VCPKG_TARGET_TRIPLET=x64-linux-release
+          VCPKG_HOST_TRIPLET=x64-linux-release
+          VCPKG_OVERLAY_TRIPLETS=/duckdb_build_dir/extension-ci-tools/toolchains
+          VCPKG_OVERLAY_PORTS=/duckdb_build_dir/extension-ci-tools/vcpkg_ports
+          BUILD_SHELL=1
+          OPENSSL_ROOT_DIR=/duckdb_build_dir/build/release/vcpkg_installed/x64-linux-release
+          OPENSSL_DIR=/duckdb_build_dir/build/release/vcpkg_installed/x64-linux-release
+          OPENSSL_USE_STATIC_LIBS=true
+          DUCKDB_PLATFORM=linux_amd64
+          DUCKDB_GIT_VERSION=v1.4.3
+          EXTENSION_NAME=ion
+          EXTENSION_CANONICAL=
+          LINUX_CI_IN_DOCKER=1
+          CCACHE_MAXSIZE=1G
+          CCACHE_NOCOMPRESS=1
+          SUBSET_EXTENSIONS_TESTS=regular
+          EOF
+
+      - name: Configure outside docker
+        env:
+          DUCKDB_GIT_VERSION: v1.4.3
+          LINUX_CI_IN_DOCKER: 0
+        run: |
+          make configure_ci
+
+      - name: Configure in docker
+        run: |
+          docker run --env-file=docker_env.txt \
             -v "$GITHUB_WORKSPACE":/duckdb_build_dir \
             -v "$GITHUB_WORKSPACE/ccache_dir":/ccache_dir \
-            duckdb/linux_amd64 bash -lc "make && make test_release"
+            duckdb/linux_amd64 make configure_ci
+
+      - name: Build in docker
+        run: |
+          docker run --env-file=docker_env.txt \
+            -v "$GITHUB_WORKSPACE":/duckdb_build_dir \
+            -v "$GITHUB_WORKSPACE/ccache_dir":/ccache_dir \
+            duckdb/linux_amd64 make release
+
+      - name: Test release in docker
+        run: |
+          docker run --env-file=docker_env.txt \
+            -v "$GITHUB_WORKSPACE":/duckdb_build_dir \
+            -v "$GITHUB_WORKSPACE/ccache_dir":/ccache_dir \
+            duckdb/linux_amd64 make test_release
