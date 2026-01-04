@@ -5,6 +5,10 @@ set(TARGET_NAME ion)
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/ionc.cmake)
 duckdb_ion_resolve_ionc(IONC_TARGET DECNUMBER_TARGET)
+set(IONC_LINK_TARGETS ${IONC_TARGET})
+if(DECNUMBER_TARGET)
+  list(APPEND IONC_LINK_TARGETS ${DECNUMBER_TARGET})
+endif()
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -20,8 +24,8 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-target_link_libraries(${EXTENSION_NAME} ${IONC_TARGET} ${DECNUMBER_TARGET})
-target_link_libraries(${LOADABLE_EXTENSION_NAME} ${IONC_TARGET} ${DECNUMBER_TARGET})
+target_link_libraries(${EXTENSION_NAME} ${IONC_LINK_TARGETS})
+target_link_libraries(${LOADABLE_EXTENSION_NAME} ${IONC_LINK_TARGETS})
 target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 

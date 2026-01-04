@@ -1,13 +1,14 @@
 include(FetchContent)
 
+set(DUCKDB_ION_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
 function(duckdb_ion_resolve_ionc out_ionc_target out_decnumber_target)
 	# Prefer an installed IonC package (vcpkg or system), fall back to FetchContent.
 	set(_ionc_target "")
 	set(_decnumber_target "")
 
 	if(DEFINED VCPKG_TARGET_TRIPLET)
-		set(_ionc_vcpkg_share_dir
-		    "${CMAKE_CURRENT_LIST_DIR}/../vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/ion-c")
+		set(_ionc_vcpkg_share_dir "${DUCKDB_ION_CMAKE_DIR}/../vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/ion-c")
 		if(EXISTS "${_ionc_vcpkg_share_dir}/IonCConfig.cmake")
 			find_package(IonC CONFIG REQUIRED PATHS "${_ionc_vcpkg_share_dir}" NO_DEFAULT_PATH)
 		else()
@@ -31,6 +32,10 @@ function(duckdb_ion_resolve_ionc out_ionc_target out_decnumber_target)
 	endif()
 
 	if(NOT _ionc_target)
+		if(POLICY CMP0169)
+			cmake_policy(SET CMP0169 OLD)
+		endif()
+
 		# FetchContent fallback for environments without vcpkg/system packages.
 		#
 		# Important: ion-c includes git submodules (bench deps like yyjson). We do not
@@ -54,7 +59,7 @@ function(duckdb_ion_resolve_ionc out_ionc_target out_decnumber_target)
 			FetchContent_Populate(ionc)
 			execute_process(
 			    COMMAND ${CMAKE_COMMAND} -DIONC_SOURCE_DIR=${ionc_SOURCE_DIR}
-			            -P ${CMAKE_CURRENT_LIST_DIR}/patch_ionc_tools.cmake)
+			            -P ${DUCKDB_ION_CMAKE_DIR}/patch_ionc_tools.cmake)
 			add_subdirectory(${ionc_SOURCE_DIR} ${ionc_BINARY_DIR})
 
 			set(BUILD_SHARED_LIBS "${_saved_build_shared_libs}" CACHE BOOL "" FORCE)
@@ -79,4 +84,3 @@ function(duckdb_ion_resolve_ionc out_ionc_target out_decnumber_target)
 	set(${out_ionc_target} "${_ionc_target}" PARENT_SCOPE)
 	set(${out_decnumber_target} "${_decnumber_target}" PARENT_SCOPE)
 endfunction()
-
