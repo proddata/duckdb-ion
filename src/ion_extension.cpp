@@ -31,20 +31,12 @@
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "ion/ionc_shim.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
 #include <mutex>
-
-#ifdef DUCKDB_IONC
-#include <ionc/ion.h>
-#include <ionc/ion_decimal.h>
-#include <ionc/ion_extractor.h>
-#include <ionc/ion_stream.h>
-#include <ionc/ion_timestamp.h>
-#include <decNumber/decQuad.h>
-#endif
 #include <cstdio>
 
 namespace duckdb {
@@ -82,11 +74,11 @@ struct IonStreamState {
 
 struct IonReadScanState {
 #ifdef DUCKDB_IONC
-	ION_READER *reader = nullptr;
+	IonCReaderHandle reader;
 	ION_READER_OPTIONS reader_options;
 	IonStreamState stream_state;
 	unordered_map<SID, idx_t> sid_map;
-	hEXTRACTOR extractor = nullptr;
+	IonCExtractorHandle extractor;
 	vector<idx_t> extractor_cols;
 	bool extractor_ready = false;
 #endif
@@ -128,10 +120,7 @@ struct IonReadScanState {
 
 	void ResetReader() {
 #ifdef DUCKDB_IONC
-		if (reader) {
-			ion_reader_close(reader);
-			reader = nullptr;
-		}
+		reader.Reset();
 #endif
 		reader_initialized = false;
 		array_initialized = false;
@@ -143,12 +132,8 @@ struct IonReadScanState {
 
 	~IonReadScanState() {
 #ifdef DUCKDB_IONC
-		if (reader) {
-			ion_reader_close(reader);
-		}
-		if (extractor) {
-			ion_extractor_close(extractor);
-		}
+		reader.Reset();
+		extractor.Reset();
 		if (stream_state.handle) {
 			stream_state.handle->Close();
 		}
@@ -742,8 +727,8 @@ static void EnsureIonExtractor(IonReadScanState &scan_state, const IonReadBindDa
 	options.max_path_length = 1;
 	options.max_num_paths = static_cast<ION_EXTRACTOR_SIZE>(projected_cols.size());
 	options.match_relative_paths = true;
-	if (ion_extractor_open(&scan_state.extractor, &options) != IERR_OK) {
-		scan_state.extractor = nullptr;
+	if (ion_extractor_open(scan_state.extractor.OutPtr(), &options) != IERR_OK) {
+		scan_state.extractor.Reset();
 		if (profile) {
 			scan_state.timing.extractor_failures++;
 			scan_state.timing.extractor_fail_open++;
@@ -753,9 +738,9 @@ static void EnsureIonExtractor(IonReadScanState &scan_state, const IonReadBindDa
 	scan_state.extractor_cols = projected_cols;
 	for (auto &col_idx : scan_state.extractor_cols) {
 		hPATH path = nullptr;
-		if (ion_extractor_path_create(scan_state.extractor, 1, IonExtractorCallback, &col_idx, &path) != IERR_OK) {
-			ion_extractor_close(scan_state.extractor);
-			scan_state.extractor = nullptr;
+		if (ion_extractor_path_create(scan_state.extractor.Get(), 1, IonExtractorCallback, &col_idx, &path) !=
+		    IERR_OK) {
+			scan_state.extractor.Reset();
 			if (profile) {
 				scan_state.timing.extractor_failures++;
 				scan_state.timing.extractor_fail_path_create++;
@@ -768,8 +753,7 @@ static void EnsureIonExtractor(IonReadScanState &scan_state, const IonReadBindDa
 		    field_name_copy.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&field_name_copy[0]));
 		field_name.length = field_name_copy.size();
 		if (ion_extractor_path_append_field(path, &field_name) != IERR_OK) {
-			ion_extractor_close(scan_state.extractor);
-			scan_state.extractor = nullptr;
+			scan_state.extractor.Reset();
 			if (profile) {
 				scan_state.timing.extractor_failures++;
 				scan_state.timing.extractor_fail_path_append++;
@@ -2438,7 +2422,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		}
 		scan_state->file_index++;
 		OpenIonFile(*scan_state, bind_data.paths[scan_state->file_index], context);
-		auto status = ion_reader_open_stream(&scan_state->reader, &scan_state->stream_state, IonStreamHandler,
+		auto status = ion_reader_open_stream(scan_state->reader.OutPtr(), &scan_state->stream_state, IonStreamHandler,
 		                                     &scan_state->reader_options);
 		if (status != IERR_OK) {
 			throw IOException("read_ion failed to open Ion reader");
@@ -2450,7 +2434,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		return true;
 	};
 	if (!scan_state->reader_initialized) {
-		auto status = ion_reader_open_stream(&scan_state->reader, &scan_state->stream_state, IonStreamHandler,
+		auto status = ion_reader_open_stream(scan_state->reader.OutPtr(), &scan_state->stream_state, IonStreamHandler,
 		                                     &scan_state->reader_options);
 		if (status != IERR_OK) {
 			throw IOException("read_ion failed to open Ion reader");
@@ -2503,7 +2487,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		while (!has_value) {
 			if (bind_data.format == IonReadBindData::Format::ARRAY) {
 				if (!scan_state->array_initialized) {
-					status = ion_reader_next(scan_state->reader, &type);
+					status = ion_reader_next(scan_state->reader.Get(), &type);
 					if (status == IERR_EOF || type == tid_EOF) {
 						if (open_next_file()) {
 							continue;
@@ -2517,14 +2501,14 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					if (type != tid_LIST) {
 						throw InvalidInputException("read_ion expects a top-level list when format='array'");
 					}
-					if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
+					if (ion_reader_step_in(scan_state->reader.Get()) != IERR_OK) {
 						throw IOException("read_ion failed to step into list");
 					}
 					scan_state->array_initialized = true;
 				}
-				status = ion_reader_next(scan_state->reader, &type);
+				status = ion_reader_next(scan_state->reader.Get(), &type);
 				if (status == IERR_EOF || type == tid_EOF) {
-					ion_reader_step_out(scan_state->reader);
+					ion_reader_step_out(scan_state->reader.Get());
 					scan_state->array_initialized = false;
 					if (open_next_file()) {
 						continue;
@@ -2537,7 +2521,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				}
 				has_value = true;
 			} else {
-				status = ion_reader_next(scan_state->reader, &type);
+				status = ion_reader_next(scan_state->reader.Get(), &type);
 				if (status == IERR_EOF || type == tid_EOF) {
 					if (open_next_file()) {
 						continue;
@@ -2568,7 +2552,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 			}
 		}
 		BOOL is_null = FALSE;
-		if (ion_reader_is_null(scan_state->reader, &is_null) != IERR_OK) {
+		if (ion_reader_is_null(scan_state->reader.Get(), &is_null) != IERR_OK) {
 			throw IOException("read_ion failed while checking null status");
 		}
 		if (is_null) {
@@ -2595,7 +2579,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 			}
 			auto struct_start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 			if (use_extractor && scan_state->extractor_ready) {
-				if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
+				if (ion_reader_step_in(scan_state->reader.Get()) != IERR_OK) {
 					throw IOException("read_ion failed to step into struct");
 				}
 				IonExtractorMatchContext ctx;
@@ -2607,7 +2591,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				ctx.remaining = required_columns;
 				ctx.profile = profile;
 				extractor_context = &ctx;
-				status = ion_extractor_match(scan_state->extractor, scan_state->reader);
+				status = ion_extractor_match(scan_state->extractor.Get(), scan_state->reader.Get());
 				extractor_context = nullptr;
 				if (status != IERR_OK) {
 					if (profile) {
@@ -2618,7 +2602,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				if (profile) {
 					scan_state->timing.extractor_matches++;
 				}
-				if (ion_reader_step_out(scan_state->reader) != IERR_OK) {
+				if (ion_reader_step_out(scan_state->reader.Get()) != IERR_OK) {
 					throw IOException("read_ion failed to step out of struct");
 				}
 				if (profile) {
@@ -2630,12 +2614,12 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				count++;
 				continue;
 			}
-			if (ion_reader_step_in(scan_state->reader) != IERR_OK) {
+			if (ion_reader_step_in(scan_state->reader.Get()) != IERR_OK) {
 				throw IOException("read_ion failed to step into struct");
 			}
 			while (true) {
 				ION_TYPE field_type = tid_NULL;
-				status = ion_reader_next(scan_state->reader, &field_type);
+				status = ion_reader_next(scan_state->reader.Get(), &field_type);
 				if (status == IERR_EOF || field_type == tid_EOF) {
 					break;
 				}
@@ -2646,7 +2630,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					scan_state->timing.fields++;
 				}
 				ION_SYMBOL *field_symbol = nullptr;
-				if (ion_reader_get_field_name_symbol(scan_state->reader, &field_symbol) != IERR_OK) {
+				if (ion_reader_get_field_name_symbol(scan_state->reader.Get(), &field_symbol) != IERR_OK) {
 					throw IOException("read_ion failed to read field name");
 				}
 				idx_t col_idx = 0;
@@ -2670,7 +2654,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					if (field_symbol && field_symbol->value.value && field_symbol->value.length > 0) {
 						field_value = field_symbol->value;
 					} else {
-						if (ion_reader_get_field_name(scan_state->reader, &field_value) != IERR_OK) {
+						if (ion_reader_get_field_name(scan_state->reader.Get(), &field_value) != IERR_OK) {
 							throw IOException("read_ion failed to read field name");
 						}
 					}
@@ -2695,7 +2679,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					if (out_idx == DConstants::INVALID_INDEX) {
 						auto value_start =
 						    profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-						SkipIonValue(scan_state->reader, field_type);
+						SkipIonValue(scan_state->reader.Get(), field_type);
 						if (profile) {
 							auto elapsed = std::chrono::steady_clock::now() - value_start;
 							scan_state->timing.value_nanos += static_cast<uint64_t>(
@@ -2707,11 +2691,11 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					auto target_type = bind_data.return_types[col_idx];
 					auto value_start =
 					    profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-					if (!ReadIonValueToVector(scan_state->reader, field_type, vec, count, target_type)) {
+					if (!ReadIonValueToVector(scan_state->reader.Get(), field_type, vec, count, target_type)) {
 						if (profile) {
 							scan_state->timing.vector_fallbacks++;
 						}
-						auto value = IonReadValue(scan_state->reader, field_type);
+						auto value = IonReadValue(scan_state->reader.Get(), field_type);
 						if (!value.IsNull()) {
 							output.SetValue(out_idx, count, value.DefaultCastAs(target_type));
 						}
@@ -2734,7 +2718,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 				} else {
 					auto value_start =
 					    profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-					SkipIonValue(scan_state->reader, field_type);
+					SkipIonValue(scan_state->reader.Get(), field_type);
 					if (profile) {
 						auto elapsed = std::chrono::steady_clock::now() - value_start;
 						scan_state->timing.value_nanos += static_cast<uint64_t>(
@@ -2742,7 +2726,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					}
 				}
 			}
-			if (ion_reader_step_out(scan_state->reader) != IERR_OK) {
+			if (ion_reader_step_out(scan_state->reader.Get()) != IERR_OK) {
 				throw IOException("read_ion failed to step out of struct");
 			}
 			if (profile) {
@@ -2752,7 +2736,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 			}
 		} else {
 			auto value_start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-			auto value = IonReadValue(scan_state->reader, type);
+			auto value = IonReadValue(scan_state->reader.Get(), type);
 			if (!value.IsNull()) {
 				auto out_idx = column_to_output.empty() ? 0 : column_to_output[0];
 				if (out_idx != DConstants::INVALID_INDEX) {
