@@ -1,4 +1,4 @@
-#include "ion_serialize.hpp"
+#include "ion/ion_serialize.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"

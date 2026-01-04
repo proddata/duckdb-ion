@@ -1,8 +1,9 @@
-#include "ion_copy.hpp"
+#include "ion/ion_copy.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/date.hpp"
@@ -199,7 +200,7 @@ static iERR IonWriteStreamHandler(struct _ion_user_stream *pstream) {
 		return IERR_WRITE_ERROR;
 	}
 	if (state->buffer.empty()) {
-		state->buffer.resize(64 * 1024);
+		state->buffer.resize(static_cast<vector<uint8_t>::size_type>(64) * 1024);
 	}
 	auto buffer_start = state->buffer.data();
 	auto buffer_end = buffer_start + state->buffer.size();
@@ -322,7 +323,7 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 		if (ion_int_init(&ion_int, nullptr) != IERR_OK) {
 			throw IOException("write_ion failed to initialize Ion int");
 		}
-		auto status = ion_int_from_chars(&ion_int, text.c_str(), text.size());
+		auto status = ion_int_from_chars(&ion_int, text.c_str(), NumericCast<SIZE>(text.size()));
 		if (status == IERR_OK) {
 			status = ion_writer_write_ion_int(writer, &ion_int);
 		}
@@ -401,7 +402,8 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 		decContext context;
 		decContextDefault(&context, DEC_INIT_DECQUAD);
 		SIZE used = 0;
-		auto status = ion_timestamp_parse(&timestamp, &mutable_text[0], mutable_text.size(), &used, &context);
+		auto status =
+		    ion_timestamp_parse(&timestamp, &mutable_text[0], NumericCast<SIZE>(mutable_text.size()), &used, &context);
 		if (status != IERR_OK) {
 			ThrowIonWriterException(state, "write_ion failed to parse timestamp", status);
 		}
@@ -419,9 +421,8 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 		auto text = StringValue::Get(value);
 		auto mutable_text = string(text);
 		ION_STRING ion_str;
-		ion_str.value =
-		    mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&mutable_text[0]));
-		ion_str.length = mutable_text.size();
+		ion_str.value = mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(&mutable_text[0]);
+		ion_str.length = NumericCast<int32_t>(mutable_text.size());
 		auto status = ion_writer_write_string(writer, &ion_str);
 		if (status != IERR_OK) {
 			ThrowIonWriterException(state, "write_ion failed to write string", status);
@@ -434,7 +435,7 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 		if (blob.GetSize() > 0) {
 			std::memcpy(buffer.data(), blob.GetData(), blob.GetSize());
 		}
-		auto status = ion_writer_write_blob(writer, buffer.data(), blob.GetSize());
+		auto status = ion_writer_write_blob(writer, buffer.data(), NumericCast<SIZE>(blob.GetSize()));
 		if (status != IERR_OK) {
 			ThrowIonWriterException(state, "write_ion failed to write blob", status);
 		}
@@ -467,9 +468,8 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 			auto &name = StructType::GetChildName(type, i);
 			auto field_name_copy = string(name);
 			ION_STRING field_name;
-			field_name.value =
-			    field_name_copy.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&field_name_copy[0]));
-			field_name.length = field_name_copy.size();
+			field_name.value = field_name_copy.empty() ? nullptr : reinterpret_cast<BYTE *>(&field_name_copy[0]);
+			field_name.length = NumericCast<int32_t>(field_name_copy.size());
 			status = ion_writer_write_field_name(writer, &field_name);
 			if (status != IERR_OK) {
 				ThrowIonWriterException(state, "write_ion failed to write field name", status);
@@ -486,9 +486,8 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 		auto text = value.ToString();
 		auto mutable_text = string(text);
 		ION_STRING ion_str;
-		ion_str.value =
-		    mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&mutable_text[0]));
-		ion_str.length = mutable_text.size();
+		ion_str.value = mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(&mutable_text[0]);
+		ion_str.length = NumericCast<int32_t>(mutable_text.size());
 		auto status = ion_writer_write_string(writer, &ion_str);
 		if (status != IERR_OK) {
 			ThrowIonWriterException(state, "write_ion failed to write fallback string", status);
@@ -583,9 +582,8 @@ static void IonBinaryCopySink(ExecutionContext &context, FunctionData &bind_data
 			auto &name = bdata.names[col];
 			auto field_name_copy = string(name);
 			ION_STRING field_name;
-			field_name.value =
-			    field_name_copy.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&field_name_copy[0]));
-			field_name.length = field_name_copy.size();
+			field_name.value = field_name_copy.empty() ? nullptr : reinterpret_cast<BYTE *>(&field_name_copy[0]);
+			field_name.length = NumericCast<int32_t>(field_name_copy.size());
 			status = ion_writer_write_field_name(state.writer, &field_name);
 			if (status != IERR_OK) {
 				ThrowIonWriterException(state.stream_state, "write_ion failed to write field name", status);

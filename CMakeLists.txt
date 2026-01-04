@@ -31,8 +31,8 @@ set(EXTENSION_SOURCES
   src/ion/read_ion_register.cpp
   src/ion/read_ion_infer.cpp
   src/ion/read_ion_value.cpp
-  src/ion_copy.cpp
-  src/ion_serialize.cpp)
+  src/ion/ion_copy.cpp
+  src/ion/ion_serialize.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

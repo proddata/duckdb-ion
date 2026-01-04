@@ -1,8 +1,8 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "ion_extension.hpp"
-#include "ion_copy.hpp"
-#include "ion_serialize.hpp"
+#include "ion/ion_copy.hpp"
+#include "ion/ion_serialize.hpp"
 #include "ion/read_ion.hpp"
 
 namespace duckdb {
