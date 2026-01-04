@@ -42,6 +42,17 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} ${IONC_LINK_TARGETS})
 target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 
+if(DUCKDB_ION_IONC_FROM_FETCHCONTENT AND DUCKDB_ION_IONC_SOURCE_DIR)
+  # When Ion-C comes from FetchContent, the ion-c targets do not reliably
+  # propagate include paths to dependents. Ensure clang-tidy/compile_commands
+  # can locate <ionc/ion.h> and decNumber headers.
+  set(DUCKDB_ION_IONC_INCLUDE_DIRS
+      "${DUCKDB_ION_IONC_SOURCE_DIR}/ionc/include"
+      "${DUCKDB_ION_IONC_SOURCE_DIR}/decNumber/include")
+  target_include_directories(${EXTENSION_NAME} SYSTEM PRIVATE ${DUCKDB_ION_IONC_INCLUDE_DIRS})
+  target_include_directories(${LOADABLE_EXTENSION_NAME} SYSTEM PRIVATE ${DUCKDB_ION_IONC_INCLUDE_DIRS})
+endif()
+
 if(DUCKDB_ION_IONC_FROM_FETCHCONTENT AND DEFINED DUCKDB_EXPORT_SET)
   foreach(ionc_dep IN LISTS IONC_LINK_TARGETS)
     if(TARGET ${ionc_dep})
