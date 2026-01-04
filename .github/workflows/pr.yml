@@ -1,15 +1,11 @@
-name: CI
+name: PR CI
+
 on:
-  push:
-    branches:
-      - main
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: '0 3 * * *'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  group: pr-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -17,7 +13,7 @@ jobs:
     name: Linux (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +24,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
             vcpkg_triplet: arm64-linux
+
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: 'true'
@@ -37,11 +34,11 @@ jobs:
       VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
       EXT_FLAGS: -DVCPKG_MANIFEST_DIR=${{ github.workspace }}
       GEN: ninja
+
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          submodules: 'true'
+          submodules: true
 
       - name: Install Ninja and ccache
         run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build ccache
@@ -50,9 +47,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+          key: ${{ runner.os }}-ccache-${{ github.ref }}
           restore-keys: |
-            ${{ runner.os }}-ccache-${{ github.ref }}-
             ${{ runner.os }}-ccache-
 
       - name: Cache vcpkg artifacts
@@ -72,35 +68,10 @@ jobs:
           vcpkgJsonGlob: 'vcpkg.json'
 
       - name: Build
-        run: |
-          make
+        run: make
 
       - name: Test
-        run: |
-          make test
-
-      - name: Memory Check (small)
-        if: matrix.arch == 'x64'
-        run: |
-          ROWS=20000 scripts/perf_generate.sh
-          RUNS=1 scripts/mem_check.sh
-
-      - name: Perf Check (small)
-        if: matrix.arch == 'x64'
-        continue-on-error: true
-        run: |
-          ROWS=20000 OUT_DIR=perf/ci_data scripts/perf_generate.sh
-          RUN_TS="ci-${{ github.sha }}" \
-            GIT_SHA="${{ github.sha }}" \
-            DATA_DIR=perf/ci_data \
-            OUT_DIR=perf/ci \
-            scripts/perf_run.sh
-          python3 scripts/perf_compare.py \
-            --baseline perf/baseline/summary.jsonl \
-            --current perf/ci/summary.jsonl \
-            --run-ts "ci-${{ github.sha }}" \
-            --cpu-threshold 0.2 \
-            --lat-threshold 0.2
+        run: make test
 
       - name: Format Check
         if: matrix.arch == 'x64'
@@ -120,25 +91,11 @@ jobs:
             VCPKG_TARGET_TRIPLET="x64-linux" \
             make tidy-check
 
-      - name: Package extension
-        if: startsWith(github.ref, 'refs/tags/')
-        id: package
-        run: |
-          asset="ion-${{ runner.os }}-${{ matrix.arch }}-${{ github.ref_name }}.tar.gz"
-          tar -czf "${asset}" -C build/release/extension/ion ion.duckdb_extension
-          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload release assets
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.package.outputs.asset }}
-
   macos:
     name: MacOS (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -151,6 +108,7 @@ jobs:
             arch: arm64
             vcpkg_triplet: arm64-osx
             ext_flags: '-DDISABLE_VPTR_SANITIZER=1'
+
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: 'true'
@@ -159,11 +117,11 @@ jobs:
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       EXT_FLAGS: ${{ matrix.ext_flags }} -DVCPKG_MANIFEST_DIR=${{ github.workspace }}
       GEN: ninja
+
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          submodules: 'true'
+          submodules: true
 
       - name: Install Ninja and ccache
         run: brew install ninja ccache
@@ -172,9 +130,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+          key: ${{ runner.os }}-ccache-${{ github.ref }}
           restore-keys: |
-            ${{ runner.os }}-ccache-${{ github.ref }}-
             ${{ runner.os }}-ccache-
 
       - name: Cache vcpkg artifacts
@@ -202,35 +159,4 @@ jobs:
           VCPKG_TARGET_TRIPLET="${{ matrix.vcpkg_triplet }}" make
 
       - name: Test
-        run: |
-          make test
-
-      - name: Format Check
-        run: |
-          python3 -m venv .venv
-          . .venv/bin/activate
-          python -m pip install "black>=24" clang_format==11.0.1 cmake-format
-          PATH="${{ github.workspace }}/.venv/bin:$PATH" make format-check
-
-      - name: Tidy Check
-        run: |
-          . .venv/bin/activate
-          python -m pip install clang-tidy
-          PATH="${{ github.workspace }}/.venv/bin:$PATH" \
-            VCPKG_TOOLCHAIN_PATH="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-            VCPKG_TARGET_TRIPLET="${{ matrix.vcpkg_triplet }}" \
-            make tidy-check
-
-      - name: Package extension
-        if: startsWith(github.ref, 'refs/tags/')
-        id: package
-        run: |
-          asset="ion-${{ runner.os }}-${{ matrix.arch }}-${{ github.ref_name }}.tar.gz"
-          tar -czf "${asset}" -C build/release/extension/ion ion.duckdb_extension
-          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload release assets
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.package.outputs.asset }}
+        run: make test
