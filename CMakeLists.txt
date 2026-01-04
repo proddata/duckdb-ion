@@ -43,13 +43,9 @@ target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 
 if(DEFINED ENV{CI} AND (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU"))
-  # CI-only: make a small set of warnings fatal to catch real UB/fragile codegen issues.
+  # CI-only: catch missing returns (real UB) without promoting warnings from DuckDB headers to errors.
   foreach(_ion_target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
-    target_compile_options(${_ion_target} PRIVATE
-                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=return-type>
-                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=switch>
-                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=switch-enum>
-                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=discarded-qualifiers>)
+    target_compile_options(${_ion_target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Werror=return-type>)
   endforeach()
 endif()
 
