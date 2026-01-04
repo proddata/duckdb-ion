@@ -69,16 +69,13 @@ function(duckdb_ion_resolve_ionc out_ionc_target out_decnumber_target)
 
 		# FetchContent fallback for environments without vcpkg/system packages.
 		#
-		# Important: ion-c includes git submodules (bench deps like yyjson). We do not
-		# build those components for the extension, and CI networking/DNS can be flaky,
-		# so we disable submodule initialization entirely.
+		# Use a release tarball (with a pinned hash) instead of a git clone to make
+		# builds more reproducible and avoid submodule-related network flakiness.
 		FetchContent_Declare(
 		    ionc
-		    GIT_REPOSITORY https://github.com/amzn/ion-c.git
-		    GIT_TAG v1.1.4
-		    GIT_SHALLOW TRUE
-		    GIT_SUBMODULES ""
-		    GIT_SUBMODULES_RECURSE FALSE)
+		    URL https://github.com/amzn/ion-c/archive/refs/tags/v1.1.4.tar.gz
+		    URL_HASH
+		        SHA512=2d7e0deff4ab83cc3a153ad8249f30025ca6cc44541c52cba56876ea355c830984aae78a88081f55c9e8c42d86e70e67d573ed2a652d2c965d286a0e8fe86ec4)
 
 		FetchContent_GetProperties(ionc)
 		if(NOT ionc_POPULATED)

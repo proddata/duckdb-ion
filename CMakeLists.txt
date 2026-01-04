@@ -42,6 +42,17 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} ${IONC_LINK_TARGETS})
 target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 
+if(DEFINED ENV{CI} AND (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU"))
+  # CI-only: make a small set of warnings fatal to catch real UB/fragile codegen issues.
+  foreach(_ion_target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+    target_compile_options(${_ion_target} PRIVATE
+                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=return-type>
+                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=switch>
+                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=switch-enum>
+                           $<$<COMPILE_LANGUAGE:CXX>:-Werror=discarded-qualifiers>)
+  endforeach()
+endif()
+
 if(DUCKDB_ION_IONC_FROM_FETCHCONTENT AND DUCKDB_ION_IONC_SOURCE_DIR)
   # When Ion-C comes from FetchContent, the ion-c targets do not reliably
   # propagate include paths to dependents. Ensure clang-tidy/compile_commands
