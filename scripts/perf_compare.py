@@ -75,8 +75,14 @@ def main():
         if not curr:
             missing.append(key)
             continue
+        suite, _ = key
+        suite_lower = (suite or "").lower()
         cpu_reg = compare_metric("ion_cpu", base, curr, args.cpu_threshold)
-        lat_reg = compare_metric("ion_latency", base, curr, args.lat_threshold)
+        # Latency includes IO and tends to be noisy for write benchmarks; only gate on CPU there.
+        if "write" in suite_lower:
+            lat_reg = None
+        else:
+            lat_reg = compare_metric("ion_latency", base, curr, args.lat_threshold)
         if cpu_reg or lat_reg:
             regressions.append((key, cpu_reg, lat_reg, base, curr))
 

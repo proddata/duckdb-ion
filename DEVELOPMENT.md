@@ -16,6 +16,19 @@ The repo uses a local vcpkg overlay in `vcpkg_ports/`.
 make
 ```
 
+## Pre-commit Checklist
+Run these before committing changes:
+```sh
+# Formatting (requires black/clang-format/cmake-format; see repo guidelines)
+make format-check
+
+# Lint (requires clang-tidy)
+make tidy-check
+
+# Tests
+make test
+```
+
 ## Project Notes
 - This repo uses a local vcpkg overlay in `vcpkg_ports/`.
 - `GEN=ninja make` is supported and recommended for faster rebuilds.

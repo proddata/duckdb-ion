@@ -5,9 +5,10 @@ DUCKDB_BIN="${DUCKDB_BIN:-./build/release/duckdb}"
 DATA_DIR="${DATA_DIR:-perf/data}"
 OUT_DIR="${OUT_DIR:-perf/results}"
 ION_PROFILE="${ION_PROFILE:-0}"
+ND_RUNS="${ND_RUNS:-3}"
 RUN_TS="${RUN_TS:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 GIT_SHA="${GIT_SHA:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
-export RUN_TS GIT_SHA
+export RUN_TS GIT_SHA ND_RUNS
 
 ION_FILE="$DATA_DIR/data.ion"
 JSON_FILE="$DATA_DIR/data.jsonl"
@@ -35,6 +36,35 @@ if [[ "$ION_PROFILE" == "1" ]]; then
   ION_PROFILE_ARG=", profile := true"
 fi
 
+ION_ND_PARALLEL_SQL=""
+JSON_ND_PARALLEL_SQL=""
+for i in $(seq 1 "$ND_RUNS"); do
+  ION_ND_PARALLEL_SQL+="PRAGMA threads=4;
+PRAGMA profiling_output='$OUT_DIR/ion_count_nd_parallel_${i}.json';
+SELECT COUNT(*)
+FROM read_ion('$ION_FILE', format := 'newline_delimited'${ION_PROFILE_ARG});
+
+PRAGMA profiling_output='$OUT_DIR/ion_project_min_nd_parallel_${i}.json';
+SELECT id
+FROM read_ion('$ION_FILE', format := 'newline_delimited'${ION_PROFILE_ARG});
+
+PRAGMA threads=1;
+
+"
+  JSON_ND_PARALLEL_SQL+="PRAGMA threads=4;
+PRAGMA profiling_output='$OUT_DIR/json_count_nd_parallel_${i}.json';
+SELECT COUNT(*)
+FROM read_json('$JSON_FILE');
+
+PRAGMA profiling_output='$OUT_DIR/json_project_min_nd_parallel_${i}.json';
+SELECT id
+FROM read_json('$JSON_FILE');
+
+PRAGMA threads=1;
+
+"
+done
+
 ION_COUNT_BINARY_SQL=""
 ION_PROJECT_BINARY_SQL=""
 ION_COUNT_WIDE_BINARY_SQL=""
@@ -60,6 +90,10 @@ LOAD json;
 LOAD ion;
 
 PRAGMA enable_profiling='json';
+
+-- Parallel newline-delimited sub-suite first to reduce noise from later wide scans + writes.
+${ION_ND_PARALLEL_SQL}
+${JSON_ND_PARALLEL_SQL}
 
 CREATE OR REPLACE TEMP TABLE perf_source AS
 SELECT * FROM read_ion('$ION_FILE');
@@ -213,26 +247,6 @@ COPY perf_wide TO '$OUT_DIR/write_binary_wide.ion' (FORMAT ION, BINARY TRUE, OVE
 
 PRAGMA profiling_output='$OUT_DIR/json_write_text_wide.json';
 COPY perf_wide TO '$OUT_DIR/write_text_wide.jsonl' (FORMAT JSON, OVERWRITE TRUE);
-
-PRAGMA threads=4;
-
-PRAGMA profiling_output='$OUT_DIR/ion_count_nd_parallel.json';
-SELECT COUNT(*)
-FROM read_ion('$ION_FILE', format := 'newline_delimited'${ION_PROFILE_ARG});
-
-PRAGMA profiling_output='$OUT_DIR/json_count_nd_parallel.json';
-SELECT COUNT(*)
-FROM read_json('$JSON_FILE');
-
-PRAGMA profiling_output='$OUT_DIR/ion_project_min_nd_parallel.json';
-SELECT id
-FROM read_ion('$ION_FILE', format := 'newline_delimited'${ION_PROFILE_ARG});
-
-PRAGMA profiling_output='$OUT_DIR/json_project_min_nd_parallel.json';
-SELECT id
-FROM read_json('$JSON_FILE');
-
-PRAGMA threads=1;
 SQL
 
 "$DUCKDB_BIN" < "$SQL_FILE"
@@ -246,12 +260,26 @@ summary_path = os.path.join(out_dir, "summary.md")
 summary_jsonl = os.path.join(out_dir, "summary.jsonl")
 run_ts = os.environ.get("RUN_TS", "unknown")
 git_sha = os.environ.get("GIT_SHA", "unknown")
+nd_runs = int(os.environ.get("ND_RUNS", "3"))
 summary_lines = []
 jsonl_rows = []
 
 def load(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+def load_median(paths, key):
+    vals = []
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        j = load(p)
+        if key in j and j[key] is not None:
+            vals.append(j[key])
+    if not vals:
+        return None
+    vals.sort()
+    return vals[len(vals) // 2]
 
 def fmt(val):
     return f"{val:.3f}s"
@@ -261,7 +289,7 @@ def ratio(a, b):
         return "n/a"
     return f"{a / b:.2f}x"
 
-def summarize_pairs(title, pairs):
+def summarize_pairs(title, pairs, replicate_pattern=False):
     print(title)
     print("Query | Ion CPU | JSON CPU | CPU Ratio | Ion Lat | JSON Lat | Lat Ratio")
     print("--- | --- | --- | --- | --- | --- | ---")
@@ -269,13 +297,32 @@ def summarize_pairs(title, pairs):
     summary_lines.append("Query | Ion CPU | JSON CPU | CPU Ratio | Ion Lat | JSON Lat | Lat Ratio")
     summary_lines.append("--- | --- | --- | --- | --- | --- | ---")
     for label, ion_file, json_file in pairs:
-        ion_path = os.path.join(out_dir, ion_file)
-        json_path = os.path.join(out_dir, json_file)
-        if not os.path.exists(ion_path) or not os.path.exists(json_path):
-            print(f"Skipping {label} (missing {ion_file} or {json_file})")
-            continue
-        ion = load(ion_path)
-        js = load(json_path)
+        if replicate_pattern:
+            ion_paths = [
+                os.path.join(out_dir, ion_file.replace(".json", f"_{i}.json"))
+                for i in range(1, nd_runs + 1)
+            ]
+            json_paths = [
+                os.path.join(out_dir, json_file.replace(".json", f"_{i}.json"))
+                for i in range(1, nd_runs + 1)
+            ]
+            ion_cpu = load_median(ion_paths, "cpu_time")
+            json_cpu = load_median(json_paths, "cpu_time")
+            ion_lat = load_median(ion_paths, "latency")
+            json_lat = load_median(json_paths, "latency")
+            if ion_cpu is None or json_cpu is None or ion_lat is None or json_lat is None:
+                print(f"Skipping {label} (missing replicated {ion_file} or {json_file})")
+                continue
+            ion = {"cpu_time": ion_cpu, "latency": ion_lat}
+            js = {"cpu_time": json_cpu, "latency": json_lat}
+        else:
+            ion_path = os.path.join(out_dir, ion_file)
+            json_path = os.path.join(out_dir, json_file)
+            if not os.path.exists(ion_path) or not os.path.exists(json_path):
+                print(f"Skipping {label} (missing {ion_file} or {json_file})")
+                continue
+            ion = load(ion_path)
+            js = load(json_path)
         jsonl_rows.append({
             "run_ts": run_ts,
             "git_sha": git_sha,
@@ -353,6 +400,7 @@ summarize_pairs(
         ("COUNT(*)", "ion_count_nd_parallel.json", "json_count_nd_parallel.json"),
         ("Project min", "ion_project_min_nd_parallel.json", "json_project_min_nd_parallel.json"),
     ],
+    replicate_pattern=True,
 )
 
 summarize_pairs(

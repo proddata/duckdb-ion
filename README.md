@@ -126,3 +126,13 @@ If you are loading a local or custom build, you may need to allow unsigned exten
 ```sql
 LOAD '/<path_to_extension>/ion.duckdb_extension';
 ```
+
+## Third-party licenses
+
+This project includes **Amazon Ion-C**, licensed under the Apache License 2.0.
+
+Copyright © 2009–2016 Amazon.com, Inc. or its affiliates.
+
+See:
+- `LICENSES/Apache-2.0.txt`
+- `LICENSES/ion-c-NOTICE.txt`

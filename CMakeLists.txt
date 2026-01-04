@@ -3,6 +3,13 @@ cmake_minimum_required(VERSION 3.11)
 # Set extension name here
 set(TARGET_NAME ion)
 
+if(CLANG_TIDY AND APPLE)
+  # clang-tidy struggles to discover system headers when the compiler is wrapped
+  # by ccache/sccache (shows up as "memory file not found" on macOS).
+  set(CMAKE_C_COMPILER_LAUNCHER "" CACHE STRING "" FORCE)
+  set(CMAKE_CXX_COMPILER_LAUNCHER "" CACHE STRING "" FORCE)
+endif()
+
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/ionc.cmake)
 duckdb_ion_resolve_ionc(IONC_TARGET DECNUMBER_TARGET)
 set(IONC_LINK_TARGETS ${IONC_TARGET})
@@ -18,8 +25,14 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
   src/ion_extension.cpp
-  src/ion_copy.cpp
-  src/ion_serialize.cpp)
+  src/ion/read_ion_bind.cpp
+  src/ion/read_ion_profile.cpp
+  src/ion/read_ion_scan.cpp
+  src/ion/read_ion_register.cpp
+  src/ion/read_ion_infer.cpp
+  src/ion/read_ion_value.cpp
+  src/ion/ion_copy.cpp
+  src/ion/ion_serialize.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -28,6 +41,24 @@ target_link_libraries(${EXTENSION_NAME} ${IONC_LINK_TARGETS})
 target_link_libraries(${LOADABLE_EXTENSION_NAME} ${IONC_LINK_TARGETS})
 target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
+
+if(DEFINED ENV{CI} AND (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU"))
+  # CI-only: catch missing returns (real UB) without promoting warnings from DuckDB headers to errors.
+  foreach(_ion_target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+    target_compile_options(${_ion_target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Werror=return-type>)
+  endforeach()
+endif()
+
+if(DUCKDB_ION_IONC_FROM_FETCHCONTENT AND DUCKDB_ION_IONC_SOURCE_DIR)
+  # When Ion-C comes from FetchContent, the ion-c targets do not reliably
+  # propagate include paths to dependents. Ensure clang-tidy/compile_commands
+  # can locate <ionc/ion.h> and decNumber headers.
+  set(DUCKDB_ION_IONC_INCLUDE_DIRS
+      "${DUCKDB_ION_IONC_SOURCE_DIR}/ionc/include"
+      "${DUCKDB_ION_IONC_SOURCE_DIR}/decNumber/include")
+  target_include_directories(${EXTENSION_NAME} SYSTEM PRIVATE ${DUCKDB_ION_IONC_INCLUDE_DIRS})
+  target_include_directories(${LOADABLE_EXTENSION_NAME} SYSTEM PRIVATE ${DUCKDB_ION_IONC_INCLUDE_DIRS})
+endif()
 
 if(DUCKDB_ION_IONC_FROM_FETCHCONTENT AND DEFINED DUCKDB_EXPORT_SET)
   foreach(ionc_dep IN LISTS IONC_LINK_TARGETS)
