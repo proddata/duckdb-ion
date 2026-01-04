@@ -9,6 +9,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "ion/ion_stream.hpp"
 #include "ion/read_ion.hpp"
+#include "ion/read_ion_profile.hpp"
 #include "ion/read_ion_value.hpp"
 
 #include <algorithm>
@@ -27,41 +28,14 @@ struct IonReadScanState {
 	unordered_map<SID, idx_t> sid_map;
 	IonCExtractorHandle extractor;
 	vector<idx_t> extractor_cols;
+	vector<string> extractor_field_names;
 	bool extractor_ready = false;
 #endif
 	idx_t file_index = 0;
 	bool finished = false;
 	bool array_initialized = false;
 	bool reader_initialized = false;
-	struct Timing {
-		uint64_t next_nanos = 0;
-		uint64_t value_nanos = 0;
-		uint64_t struct_nanos = 0;
-		uint64_t extractor_matches = 0;
-		uint64_t extractor_attempts = 0;
-		uint64_t extractor_failures = 0;
-		uint64_t extractor_fail_open = 0;
-		uint64_t extractor_fail_path_create = 0;
-		uint64_t extractor_fail_path_append = 0;
-		uint64_t extractor_callbacks = 0;
-		uint64_t rows = 0;
-		uint64_t fields = 0;
-		uint64_t value_calls = 0;
-		uint64_t vector_attempts = 0;
-		uint64_t vector_success = 0;
-		uint64_t vector_fallbacks = 0;
-		uint64_t bool_values = 0;
-		uint64_t int_values = 0;
-		uint64_t float_values = 0;
-		uint64_t decimal_values = 0;
-		uint64_t timestamp_values = 0;
-		uint64_t string_values = 0;
-		uint64_t blob_values = 0;
-		uint64_t list_values = 0;
-		uint64_t struct_values = 0;
-		uint64_t other_values = 0;
-		bool reported = false;
-	} timing;
+	ion::IonReadTiming timing;
 	vector<uint32_t> seen;
 	uint32_t row_counter = 0;
 
@@ -98,7 +72,7 @@ struct IonReadGlobalState : public GlobalTableFunctionState {
 	bool parallel_enabled = false;
 	vector<column_t> column_ids;
 	idx_t inflight_ranges = 0;
-	IonReadScanState::Timing aggregate_timing;
+	ion::IonReadTiming aggregate_timing;
 	idx_t projected_columns = 0;
 	unordered_map<string, idx_t> name_view_map;
 
@@ -112,9 +86,9 @@ struct IonReadLocalState : public LocalTableFunctionState {
 	bool range_assigned = false;
 };
 
-static Value IonReadValue(ION_READER *reader, ION_TYPE type);
+static Value IonReadValue(ION_READER *reader, ION_TYPE type, ion::IonReadTiming *timing);
 static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector &vector, idx_t row,
-                                 const LogicalType &target_type);
+                                 const LogicalType &target_type, ion::IonReadTiming *timing);
 static inline void SkipIonValue(ION_READER *reader, ION_TYPE type);
 static iERR IonExtractorCallback(hREADER reader, hPATH matched_path, void *user_context,
                                  ION_EXTRACTOR_CONTROL *p_control);
@@ -141,6 +115,8 @@ static void EnsureIonExtractor(IonReadScanState &scan_state, const IonReadBindDa
 		return;
 	}
 	scan_state.extractor_cols = projected_cols;
+	scan_state.extractor_field_names.clear();
+	scan_state.extractor_field_names.reserve(projected_cols.size());
 	for (auto &col_idx : scan_state.extractor_cols) {
 		hPATH path = nullptr;
 		if (ion_extractor_path_create(scan_state.extractor.Get(), 1, IonExtractorCallback, &col_idx, &path) !=
@@ -152,7 +128,8 @@ static void EnsureIonExtractor(IonReadScanState &scan_state, const IonReadBindDa
 			}
 			return;
 		}
-		auto field_name_copy = bind_data.names[col_idx];
+		scan_state.extractor_field_names.push_back(bind_data.names[col_idx]);
+		auto &field_name_copy = scan_state.extractor_field_names.back();
 		ION_STRING field_name;
 		field_name.value = field_name_copy.empty() ? nullptr : reinterpret_cast<BYTE *>(&field_name_copy[0]);
 		field_name.length = NumericCast<int32_t>(field_name_copy.size());
@@ -279,32 +256,7 @@ static bool InitializeIonRange(IonReadGlobalState &global_state, IonReadLocalSta
 
 static void ReportProfile(IonReadGlobalState &global_state, IonReadScanState &scan_state) {
 	lock_guard<mutex> guard(global_state.lock);
-	global_state.aggregate_timing.next_nanos += scan_state.timing.next_nanos;
-	global_state.aggregate_timing.value_nanos += scan_state.timing.value_nanos;
-	global_state.aggregate_timing.struct_nanos += scan_state.timing.struct_nanos;
-	global_state.aggregate_timing.extractor_matches += scan_state.timing.extractor_matches;
-	global_state.aggregate_timing.extractor_attempts += scan_state.timing.extractor_attempts;
-	global_state.aggregate_timing.extractor_failures += scan_state.timing.extractor_failures;
-	global_state.aggregate_timing.extractor_fail_open += scan_state.timing.extractor_fail_open;
-	global_state.aggregate_timing.extractor_fail_path_create += scan_state.timing.extractor_fail_path_create;
-	global_state.aggregate_timing.extractor_fail_path_append += scan_state.timing.extractor_fail_path_append;
-	global_state.aggregate_timing.extractor_callbacks += scan_state.timing.extractor_callbacks;
-	global_state.aggregate_timing.rows += scan_state.timing.rows;
-	global_state.aggregate_timing.fields += scan_state.timing.fields;
-	global_state.aggregate_timing.value_calls += scan_state.timing.value_calls;
-	global_state.aggregate_timing.vector_attempts += scan_state.timing.vector_attempts;
-	global_state.aggregate_timing.vector_success += scan_state.timing.vector_success;
-	global_state.aggregate_timing.vector_fallbacks += scan_state.timing.vector_fallbacks;
-	global_state.aggregate_timing.bool_values += scan_state.timing.bool_values;
-	global_state.aggregate_timing.int_values += scan_state.timing.int_values;
-	global_state.aggregate_timing.float_values += scan_state.timing.float_values;
-	global_state.aggregate_timing.decimal_values += scan_state.timing.decimal_values;
-	global_state.aggregate_timing.timestamp_values += scan_state.timing.timestamp_values;
-	global_state.aggregate_timing.string_values += scan_state.timing.string_values;
-	global_state.aggregate_timing.blob_values += scan_state.timing.blob_values;
-	global_state.aggregate_timing.list_values += scan_state.timing.list_values;
-	global_state.aggregate_timing.struct_values += scan_state.timing.struct_values;
-	global_state.aggregate_timing.other_values += scan_state.timing.other_values;
+	ion::AccumulateIonReadTiming(global_state.aggregate_timing, scan_state.timing);
 	if (global_state.inflight_ranges > 0) {
 		global_state.inflight_ranges--;
 	}
@@ -312,36 +264,7 @@ static void ReportProfile(IonReadGlobalState &global_state, IonReadScanState &sc
 	                  (global_state.next_offset >= global_state.file_size && global_state.inflight_ranges == 0);
 	if (done && !global_state.aggregate_timing.reported) {
 		global_state.aggregate_timing.reported = true;
-		auto to_ms = [](uint64_t nanos) {
-			return static_cast<double>(nanos) / 1000000.0;
-		};
-		std::cout << "read_ion aggregate timing: rows=" << global_state.aggregate_timing.rows
-		          << " fields=" << global_state.aggregate_timing.fields
-		          << " next_ms=" << to_ms(global_state.aggregate_timing.next_nanos)
-		          << " value_ms=" << to_ms(global_state.aggregate_timing.value_nanos)
-		          << " struct_ms=" << to_ms(global_state.aggregate_timing.struct_nanos)
-		          << " extractor_matches=" << global_state.aggregate_timing.extractor_matches
-		          << " extractor_attempts=" << global_state.aggregate_timing.extractor_attempts
-		          << " extractor_failures=" << global_state.aggregate_timing.extractor_failures
-		          << " extractor_fail_open=" << global_state.aggregate_timing.extractor_fail_open
-		          << " extractor_fail_path_create=" << global_state.aggregate_timing.extractor_fail_path_create
-		          << " extractor_fail_path_append=" << global_state.aggregate_timing.extractor_fail_path_append
-		          << " extractor_callbacks=" << global_state.aggregate_timing.extractor_callbacks
-		          << " projected_columns=" << global_state.projected_columns
-		          << " value_calls=" << global_state.aggregate_timing.value_calls
-		          << " vector_attempts=" << global_state.aggregate_timing.vector_attempts
-		          << " vector_success=" << global_state.aggregate_timing.vector_success
-		          << " vector_fallbacks=" << global_state.aggregate_timing.vector_fallbacks
-		          << " bool=" << global_state.aggregate_timing.bool_values
-		          << " int=" << global_state.aggregate_timing.int_values
-		          << " float=" << global_state.aggregate_timing.float_values
-		          << " decimal=" << global_state.aggregate_timing.decimal_values
-		          << " timestamp=" << global_state.aggregate_timing.timestamp_values
-		          << " string=" << global_state.aggregate_timing.string_values
-		          << " blob=" << global_state.aggregate_timing.blob_values
-		          << " list=" << global_state.aggregate_timing.list_values
-		          << " struct=" << global_state.aggregate_timing.struct_values
-		          << " other=" << global_state.aggregate_timing.other_values << '\n';
+		ion::PrintIonReadTiming(global_state.aggregate_timing);
 	}
 }
 
@@ -379,21 +302,6 @@ static inline void SkipIonValue(ION_READER *reader, ION_TYPE type) {
 	ion::SkipIonValueImpl(reader, type);
 #endif
 }
-
-static IonReadScanState::Timing *&IonTimingContext() {
-	static thread_local IonReadScanState::Timing *ctx = nullptr;
-	return ctx;
-}
-
-struct IonTimingScope {
-	IonReadScanState::Timing *prev = nullptr;
-	explicit IonTimingScope(IonReadScanState::Timing *next) : prev(IonTimingContext()) {
-		IonTimingContext() = next;
-	}
-	~IonTimingScope() {
-		IonTimingContext() = prev;
-	}
-};
 
 struct IonExtractorMatchContext {
 	IonReadScanState *scan_state = nullptr;
@@ -434,12 +342,13 @@ static iERR IonExtractorCallback(hREADER reader, hPATH matched_path, void *user_
 	}
 	auto &vec = ctx.output->data[out_idx];
 	auto target_type = ctx.bind_data->return_types[col_idx];
+	auto timing_context = ctx.profile ? &ctx.scan_state->timing : nullptr;
 	auto value_start = ctx.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-	if (!ReadIonValueToVector(reader, type, vec, ctx.row, target_type)) {
+	if (!ReadIonValueToVector(reader, type, vec, ctx.row, target_type, timing_context)) {
 		if (ctx.profile) {
 			ctx.scan_state->timing.vector_fallbacks++;
 		}
-		auto value = IonReadValue(reader, type);
+		auto value = IonReadValue(reader, type, timing_context);
 		if (!value.IsNull()) {
 			ctx.output->SetValue(out_idx, ctx.row, value.DefaultCastAs(target_type));
 		}
@@ -467,8 +376,7 @@ static iERR IonExtractorCallback(hREADER reader, hPATH matched_path, void *user_
 	return IERR_OK;
 }
 
-static inline void IncrementIonTimingForType(ION_TYPE timing_type) {
-	auto timing_context = IonTimingContext();
+static inline void IncrementIonTimingForType(ION_TYPE timing_type, ion::IonReadTiming *timing_context) {
 	if (!timing_context) {
 		return;
 	}
@@ -508,18 +416,16 @@ static inline void IncrementIonTimingForType(ION_TYPE timing_type) {
 	}
 }
 
-static Value IonReadValue(ION_READER *reader, ION_TYPE type) {
-	auto timing_context = IonTimingContext();
+static Value IonReadValue(ION_READER *reader, ION_TYPE type, ion::IonReadTiming *timing_context) {
 	if (timing_context) {
 		timing_context->value_calls++;
-		IncrementIonTimingForType(type);
+		IncrementIonTimingForType(type, timing_context);
 	}
 	return ion::IonReadValueImpl(reader, type);
 }
 
 static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector &vector, idx_t row,
-                                 const LogicalType &target_type) {
-	auto timing_context = IonTimingContext();
+                                 const LogicalType &target_type, ion::IonReadTiming *timing_context) {
 	if (timing_context) {
 		timing_context->vector_attempts++;
 	}
@@ -529,7 +435,7 @@ static bool ReadIonValueToVector(ION_READER *reader, ION_TYPE field_type, Vector
 	}
 	if (status == ion::IonVectorReadStatus::VALUE_WRITTEN) {
 		if (timing_context) {
-			IncrementIonTimingForType(field_type);
+			IncrementIonTimingForType(field_type, timing_context);
 			timing_context->vector_success++;
 		}
 		return true;
@@ -559,6 +465,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 #else
 	auto &bind_data = data_p.bind_data->Cast<IonReadBindData>();
 	const auto profile = bind_data.profile;
+	auto timing_context = profile ? &scan_state->timing : nullptr;
 	auto open_next_file = [&]() -> bool {
 		if (scan_state->file_index + 1 >= bind_data.paths.size()) {
 			return false;
@@ -584,7 +491,6 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 		}
 		scan_state->reader_initialized = true;
 	}
-	IonTimingScope timing_scope(profile ? &scan_state->timing : nullptr);
 	auto &column_ids = global_state.column_ids;
 	vector<idx_t> column_to_output;
 	if (!column_ids.empty()) {
@@ -834,11 +740,12 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 					auto target_type = bind_data.return_types[col_idx];
 					auto value_start =
 					    profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-					if (!ReadIonValueToVector(scan_state->reader.Get(), field_type, vec, count, target_type)) {
+					if (!ReadIonValueToVector(scan_state->reader.Get(), field_type, vec, count, target_type,
+					                          timing_context)) {
 						if (profile) {
 							scan_state->timing.vector_fallbacks++;
 						}
-						auto value = IonReadValue(scan_state->reader.Get(), field_type);
+						auto value = IonReadValue(scan_state->reader.Get(), field_type, timing_context);
 						if (!value.IsNull()) {
 							output.SetValue(out_idx, count, value.DefaultCastAs(target_type));
 						}
@@ -879,7 +786,7 @@ static void IonReadFunction(ClientContext &context, TableFunctionInput &data_p, 
 			}
 		} else {
 			auto value_start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-			auto value = IonReadValue(scan_state->reader.Get(), type);
+			auto value = IonReadValue(scan_state->reader.Get(), type, timing_context);
 			if (!value.IsNull()) {
 				auto out_idx = column_to_output.empty() ? 0 : column_to_output[0];
 				if (out_idx != DConstants::INVALID_INDEX) {

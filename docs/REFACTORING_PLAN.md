@@ -4,6 +4,12 @@ Goal: improve maintainability and testability of the Ion extension implementatio
 
 Scope: refactor `read_ion` implementation currently concentrated in `src/ion_extension.cpp` into smaller modules, with clearer ownership boundaries around Ion-C handles, schema inference, scanning, and value conversion.
 
+## Status (as of 2026-01-04)
+- Completed through Step 6: `read_ion` is split into `bind`/`infer`/`scan`/`value`, and registration is in `src/ion/read_ion_register.cpp`.
+- `src/ion_extension.cpp` is now a thin extension entrypoint that calls `duckdb::ion::RegisterReadIon(loader)` plus registers copy/scalar functions.
+- Checks verified: `make`, `make test`, `make format-check`, `make tidy-check`.
+- Perf sanity: ran `scripts/perf_run.sh` on `perf/data_1m`; no consistent regression observed. `scripts/perf_compare.py` flagged the *parallel newline-delimited / Project min* row once, but repeated isolated runs were within baseline variance (suite-level noise likely due to ordering/memory pressure in the full perf suite).
+
 Non-goals:
 - Changing the SQL API (`read_ion` parameters, defaults, output semantics).
 - Changing binary/text Ion semantics.
@@ -12,13 +18,14 @@ Non-goals:
 
 ## Current Structure (for orientation)
 
-`src/ion_extension.cpp` currently contains:
-- DuckDB table-function lifecycle: `IonReadBind` → `IonReadInit` → `IonReadInitLocal` → `IonReadFunction`
-- Parameter parsing helpers: `Parse*Parameter`, `ParseIonPaths`, `ParseColumnsParameter`
-- Schema inference: `InferIonSchema`, `ExtractIonStructure`, `IonStructureToType`, `PromoteIonType`, etc.
-- Runtime reading: file/range management (`OpenIonFile`, range splitting), optional extractor path, vectorized read helpers
-- Value conversion: `IonReadValue` (+ helpers for decimals/timestamps/skip)
-- Profiling/timing plumbing: `IonTimingScope`, `ReportProfile`
+`read_ion` is now split across:
+- `src/ion/read_ion_register.cpp`: table function registration (`RegisterReadIon`)
+- `src/ion/read_ion_bind.cpp`: bind + parameter parsing
+- `src/ion/read_ion_infer.cpp`: schema inference
+- `src/ion/read_ion_scan.cpp`: init/local-init/scan loop + parallel range splitting + extractor integration
+- `src/ion/read_ion_value.cpp`: value conversion and vectorized fast paths
+
+`src/ion_extension.cpp` is now only the extension entrypoint wiring (read registration + copy/scalars).
 
 ## Refactoring Principles
 
@@ -39,6 +46,8 @@ Non-goals:
   - Declares bind data structs if they’re used across translation units.
 - `src/include/ion/ionc_shim.hpp`
   - Tiny adapter layer that isolates Ion-C includes, types, and `#ifdef DUCKDB_IONC`.
+- `src/include/ion/read_ion_bind.hpp`, `src/include/ion/read_ion_scan.hpp`, `src/include/ion/read_ion_infer.hpp`, `src/include/ion/read_ion_value.hpp`
+  - Module entrypoints used across translation units.
 
 ### Implementation files (`src/`)
 - `src/ion/read_ion_register.cpp`
@@ -102,10 +111,18 @@ Notes:
 - Replace `src/ion_extension.cpp` with a small file that only wires the extension entrypoints (or remove it and update `CMakeLists.txt` sources accordingly).
 - Ensure the extension still builds as static and loadable.
 
-### Step 7: Optional cleanups (only if safe)
+### Step 7: Optional read_ion cleanups (only if safe)
 - Reduce global/static state where feasible (e.g., thread_local contexts) by threading through explicit pointers in scan state.
 - Clarify ownership and mutability in the extractor path (avoid copying strings unless necessary).
 - Consider moving profiling logic behind a feature flag or a small interface to reduce clutter in scan loop.
+
+### Step 8: Align write/copy modules with read_ion structure
+Goal: keep the extension layout “top notch” and ensure consistency across read/write/copy.
+- Move `src/ion_copy.cpp` → `src/ion/ion_copy.cpp` and `src/ion_serialize.cpp` → `src/ion/ion_serialize.cpp` (or similar), update `CMakeLists.txt`.
+- Move headers to `src/include/ion/` (e.g., `src/include/ion/copy.hpp`, `src/include/ion/serialize.hpp`) and update includes.
+- Keep `src/ion_extension.cpp` as entrypoint wiring only (calls into `src/ion/*_register.cpp` style modules).
+- Ensure `make tidy-check` covers these files (currently the tidy runner filters on `src/<subdir>/...`).
+- Run `make`, `make test`, `make format-check`, `make tidy-check`, and re-run the perf suite.
 
 ## Validation Checklist (per step)
 - `make` (release build)
@@ -117,4 +134,3 @@ Notes:
 ## Risk Notes
 - DuckDB’s extension build pipeline and export sets are sensitive to how libraries/targets are linked. Prefer linking via imported targets from vcpkg and avoid introducing new non-exported build targets into DuckDB export sets.
 - Keep `#ifdef DUCKDB_IONC` behavior stable: the extension should fail clearly at runtime if built without Ion-C support.
-
