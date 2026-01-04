@@ -419,7 +419,8 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 		auto text = StringValue::Get(value);
 		auto mutable_text = string(text);
 		ION_STRING ion_str;
-		ion_str.value = mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&mutable_text[0]));
+		ion_str.value =
+		    mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&mutable_text[0]));
 		ion_str.length = mutable_text.size();
 		auto status = ion_writer_write_string(writer, &ion_str);
 		if (status != IERR_OK) {
@@ -485,7 +486,8 @@ static void WriteIonValue(hWRITER writer, const Value &value, const LogicalType 
 		auto text = value.ToString();
 		auto mutable_text = string(text);
 		ION_STRING ion_str;
-		ion_str.value = mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&mutable_text[0]));
+		ion_str.value =
+		    mutable_text.empty() ? nullptr : reinterpret_cast<BYTE *>(static_cast<void *>(&mutable_text[0]));
 		ion_str.length = mutable_text.size();
 		auto status = ion_writer_write_string(writer, &ion_str);
 		if (status != IERR_OK) {
