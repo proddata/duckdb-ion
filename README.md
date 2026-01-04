@@ -4,16 +4,8 @@
 ![GitHub License](https://img.shields.io/github/license/proddata/duckdb-ion)
 
 
-This repository implements a DuckDB extension for reading and writing AWS Ion data. It is based on the DuckDB extension template (`docs/TEMPLATE_README.md`) and is intended for eventual distribution via community extensions.
+This repository implements a DuckDB extension for reading and writing AWS Ion data.
 
-## Status
-- `read_ion(path)` reads newline-delimited Ion structs and maps fields to columns using schema inference.
-- `read_ion(path, columns := {field: 'TYPE', ...})` uses an explicit schema and skips inference.
-- `read_ion(path, records := false)` reads scalar values into a single `ion` column.
-- `read_ion(path, format := 'array')` reads from a top-level Ion list (array) instead of top-level values.
-- Nested Ion structs and lists are supported and map to DuckDB `STRUCT` and `LIST` types.
-- Binary Ion is supported when input starts with the Ion version marker.
-- `COPY ... (FORMAT ION)` writes Ion text; `COPY ... (FORMAT ION, BINARY TRUE)` writes Ion binary.
 
 ## Parameters
 `read_ion` accepts a single file path, a glob (e.g., `test/ion/*.ion`), or a list of paths.
@@ -125,16 +117,12 @@ Notes:
 - Struct field names are written as Ion symbols (bare when valid identifiers, otherwise single‑quoted).
 
 ## Installing (Unsigned)
-If you are loading a local or custom build, you may need `allow_unsigned_extensions`:
-```sql
-SET allow_unsigned_extensions=true;
-INSTALL ion;
-LOAD ion;
+If you are loading a local or custom build, you may need to allow unsigned extensions:
+
+```sh
+% duckdb --unsigned
 ```
 
-For custom repositories:
 ```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/ion/latest';
-INSTALL ion;
-LOAD ion;
+LOAD '/<path_to_extension>/ion.duckdb_extension';
 ```
