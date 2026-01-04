@@ -29,6 +29,21 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} ${IONC_LINK_TARGETS})
 target_compile_definitions(${EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE DUCKDB_IONC DECNUMDIGITS=34)
 
+if(DUCKDB_ION_IONC_FROM_FETCHCONTENT AND DEFINED DUCKDB_EXPORT_SET)
+  foreach(ionc_dep IN LISTS IONC_LINK_TARGETS)
+    if(TARGET ${ionc_dep})
+      get_target_property(_ionc_dep_imported ${ionc_dep} IMPORTED)
+      if(NOT _ionc_dep_imported)
+        install(
+          TARGETS ${ionc_dep}
+          EXPORT "${DUCKDB_EXPORT_SET}"
+          LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
+          ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+      endif()
+    endif()
+  endforeach()
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"

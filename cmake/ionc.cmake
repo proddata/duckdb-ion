@@ -6,11 +6,41 @@ function(duckdb_ion_resolve_ionc out_ionc_target out_decnumber_target)
 	# Prefer an installed IonC package (vcpkg or system), fall back to FetchContent.
 	set(_ionc_target "")
 	set(_decnumber_target "")
+	set(DUCKDB_ION_IONC_FROM_FETCHCONTENT FALSE PARENT_SCOPE)
 
 	if(DEFINED VCPKG_TARGET_TRIPLET)
-		set(_ionc_vcpkg_share_dir "${DUCKDB_ION_CMAKE_DIR}/../vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/ion-c")
-		if(EXISTS "${_ionc_vcpkg_share_dir}/IonCConfig.cmake")
-			find_package(IonC CONFIG REQUIRED PATHS "${_ionc_vcpkg_share_dir}" NO_DEFAULT_PATH)
+		set(_ionc_candidate_share_dirs "")
+		list(APPEND _ionc_candidate_share_dirs
+		     "${DUCKDB_ION_CMAKE_DIR}/../vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/ion-c")
+
+		if(DEFINED VCPKG_INSTALLED_DIR)
+			list(APPEND _ionc_candidate_share_dirs "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/ion-c")
+		endif()
+
+		if(DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES ".*/scripts/buildsystems/vcpkg\\.cmake$")
+			get_filename_component(_vcpkg_buildsystems_dir "${CMAKE_TOOLCHAIN_FILE}" DIRECTORY)
+			get_filename_component(_vcpkg_scripts_dir "${_vcpkg_buildsystems_dir}" DIRECTORY)
+			get_filename_component(_vcpkg_root_dir "${_vcpkg_scripts_dir}" DIRECTORY)
+			list(APPEND _ionc_candidate_share_dirs "${_vcpkg_root_dir}/installed/${VCPKG_TARGET_TRIPLET}/share/ion-c")
+		endif()
+
+		if(DEFINED VCPKG_ROOT)
+			list(APPEND _ionc_candidate_share_dirs "${VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}/share/ion-c")
+		endif()
+		if(DEFINED ENV{VCPKG_ROOT})
+			list(APPEND _ionc_candidate_share_dirs "$ENV{VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}/share/ion-c")
+		endif()
+
+		set(_found_ionc_share_dir "")
+		foreach(_candidate_dir IN LISTS _ionc_candidate_share_dirs)
+			if(EXISTS "${_candidate_dir}/IonCConfig.cmake")
+				set(_found_ionc_share_dir "${_candidate_dir}")
+				break()
+			endif()
+		endforeach()
+
+		if(_found_ionc_share_dir)
+			find_package(IonC CONFIG REQUIRED PATHS "${_found_ionc_share_dir}" NO_DEFAULT_PATH)
 		else()
 			find_package(IonC CONFIG QUIET)
 		endif()
@@ -61,6 +91,7 @@ function(duckdb_ion_resolve_ionc out_ionc_target out_decnumber_target)
 			    COMMAND ${CMAKE_COMMAND} -DIONC_SOURCE_DIR=${ionc_SOURCE_DIR}
 			            -P ${DUCKDB_ION_CMAKE_DIR}/patch_ionc_tools.cmake)
 			add_subdirectory(${ionc_SOURCE_DIR} ${ionc_BINARY_DIR})
+			set(DUCKDB_ION_IONC_FROM_FETCHCONTENT TRUE PARENT_SCOPE)
 
 			set(BUILD_SHARED_LIBS "${_saved_build_shared_libs}" CACHE BOOL "" FORCE)
 		endif()

@@ -35,6 +35,7 @@ jobs:
       CCACHE_BASEDIR: ${{ github.workspace }}
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      EXT_FLAGS: -DVCPKG_MANIFEST_DIR=${{ github.workspace }}
       GEN: ninja
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +157,7 @@ jobs:
       CCACHE_MAXSIZE: 400M
       CCACHE_BASEDIR: ${{ github.workspace }}
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
-      EXT_FLAGS: ${{ matrix.ext_flags }}
+      EXT_FLAGS: ${{ matrix.ext_flags }} -DVCPKG_MANIFEST_DIR=${{ github.workspace }}
       GEN: ninja
     steps:
       - uses: actions/checkout@v4
