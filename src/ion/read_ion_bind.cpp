@@ -170,7 +170,7 @@ static auto GlobFilesCompatImpl(FS &fs, const string &path, ClientContext &conte
 }
 
 template <class FS>
-static auto GlobFilesCompatImpl(FS &fs, const string &path, ClientContext &, const FileGlobInput &input, long)
+static auto GlobFilesCompatImpl(FS &fs, const string &path, ClientContext &, const FileGlobInput &input, int64)
     -> decltype(fs.GlobFiles(path, input)) {
 	return fs.GlobFiles(path, input);
 }
