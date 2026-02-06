@@ -9,6 +9,8 @@
 #include "ion/read_ion.hpp"
 #include "ion/read_ion_infer.hpp"
 
+#include <cstdint>
+
 namespace duckdb {
 namespace ion {
 
@@ -170,7 +172,7 @@ static auto GlobFilesCompatImpl(FS &fs, const string &path, ClientContext &conte
 }
 
 template <class FS>
-static auto GlobFilesCompatImpl(FS &fs, const string &path, ClientContext &, const FileGlobInput &input, long)
+static auto GlobFilesCompatImpl(FS &fs, const string &path, ClientContext &, const FileGlobInput &input, int64_t)
     -> decltype(fs.GlobFiles(path, input)) {
 	return fs.GlobFiles(path, input);
 }
